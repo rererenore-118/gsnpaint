@@ -1,56 +1,60 @@
 import 'package:flutter/material.dart';
 
-void main() => runApp(const GsnEditorApp());
-
-class GsnEditorApp extends StatelessWidget {
-  const GsnEditorApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return const MaterialApp(
-      home: GsnEditorScreen(),
-    );
-  }
-}
+void main() => runApp(const MaterialApp(home: GsnEditor()));
 
 enum GsnNodeType { goal, strategy, solution }
 
 class GsnNode {
+  final int id;
   final GsnNodeType type;
-  final String label;
-  final Offset position;
-
-  GsnNode({required this.type, required this.label, required this.position});
+  Offset position;
+  GsnNode({required this.id, required this.type, required this.position});
 }
 
-class GsnEditorScreen extends StatefulWidget {
-  const GsnEditorScreen({super.key});
+class GsnEdge {
+  final int fromId;
+  final int toId;
+  GsnEdge(this.fromId, this.toId);
+}
+
+class GsnEditor extends StatefulWidget {
+  const GsnEditor({super.key});
 
   @override
-  State<GsnEditorScreen> createState() => _GsnEditorScreenState();
+  State<GsnEditor> createState() => _GsnEditorState();
 }
 
-class _GsnEditorScreenState extends State<GsnEditorScreen> {
+class _GsnEditorState extends State<GsnEditor> {
   final List<GsnNode> _nodes = [];
-
-  double _nextY = 50;
+  final List<GsnEdge> _edges = [];
+  int _nodeCounter = 0;
+  int? _connectingNodeId;
 
   void _addNode(GsnNodeType type) {
-    String label = switch (type) {
-      GsnNodeType.goal => 'Goal',
-      GsnNodeType.strategy => 'Strategy',
-      GsnNodeType.solution => 'Solution',
-    };
-
-    final node = GsnNode(
-      type: type,
-      label: label,
-      position: Offset(150, _nextY),
-    );
-
     setState(() {
-      _nodes.add(node);
-      _nextY += 100; // 次のノードのy座標
+      _nodes.add(GsnNode(
+        id: _nodeCounter++,
+        type: type,
+        position: const Offset(100, 100),
+      ));
+    });
+  }
+
+  void _startConnection(int nodeId) {
+    setState(() {
+      if (_connectingNodeId == null) {
+        _connectingNodeId = nodeId;
+      } else if (_connectingNodeId != nodeId) {
+        _edges.add(GsnEdge(_connectingNodeId!, nodeId));
+        _connectingNodeId = null;
+      }
+    });
+  }
+
+  void _updateNodePosition(int nodeId, Offset newPosition) {
+    setState(() {
+      final node = _nodes.firstWhere((n) => n.id == nodeId);
+      node.position = newPosition;
     });
   }
 
@@ -58,87 +62,87 @@ class _GsnEditorScreenState extends State<GsnEditorScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('GSNノードエディタ'),
+        title: const Text("GSNエディタ"),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.bubble_chart),
-            tooltip: 'Goal追加',
-            onPressed: () => _addNode(GsnNodeType.goal),
-          ),
-          IconButton(
-            icon: const Icon(Icons.account_tree),
-            tooltip: 'Strategy追加',
-            onPressed: () => _addNode(GsnNodeType.strategy),
-          ),
-          IconButton(
-            icon: const Icon(Icons.check_circle),
-            tooltip: 'Solution追加',
-            onPressed: () => _addNode(GsnNodeType.solution),
-          ),
+          IconButton(onPressed: () => _addNode(GsnNodeType.goal), icon: const Icon(Icons.flag)),
+          IconButton(onPressed: () => _addNode(GsnNodeType.strategy), icon: const Icon(Icons.extension)),
+          IconButton(onPressed: () => _addNode(GsnNodeType.solution), icon: const Icon(Icons.check_circle)),
         ],
       ),
-      body: CustomPaint(
-        painter: GsnPainter(nodes: _nodes),
-        child: Container(),
+      body: GestureDetector(
+        child: Stack(
+          children: [
+            // 線の描画（カスタムペイント）
+            CustomPaint(
+              size: Size.infinite,
+              painter: GsnEdgePainter(_nodes, _edges),
+            ),
+            // ノード描画とイベント処理
+            ..._nodes.map((node) {
+              return Positioned(
+                left: node.position.dx,
+                top: node.position.dy,
+                child: GestureDetector(
+                  onTap: () => _startConnection(node.id),
+                  onPanUpdate: (details) {
+                    _updateNodePosition(node.id, node.position + details.delta);
+                  },
+                  child: _buildNodeWidget(node),
+                ),
+              );
+            }).toList(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNodeWidget(GsnNode node) {
+    final color = switch (node.type) {
+      GsnNodeType.goal => Colors.lightBlue,
+      GsnNodeType.strategy => Colors.orangeAccent,
+      GsnNodeType.solution => Colors.greenAccent,
+    };
+
+    return Container(
+      width: 100,
+      height: 60,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: color,
+        border: Border.all(color: Colors.black, width: 2),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        node.type.name.toUpperCase(),
+        style: const TextStyle(fontWeight: FontWeight.bold),
       ),
     );
   }
 }
 
-class GsnPainter extends CustomPainter {
+class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
+  final List<GsnEdge> edges;
 
-  GsnPainter({required this.nodes});
+  GsnEdgePainter(this.nodes, this.edges);
 
   @override
   void paint(Canvas canvas, Size size) {
-    const nodeSize = Size(120, 60);
-
-    final Paint rectPaint = Paint()
-      ..color = Colors.yellow.shade100
-      ..style = PaintingStyle.fill;
-
-    final Paint borderPaint = Paint()
-      ..color = Colors.orange
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-
-    final Paint arrowPaint = Paint()
+    final paint = Paint()
       ..color = Colors.black
       ..strokeWidth = 2;
 
-    // ノード描画
-    for (var node in nodes) {
-      final rect = Rect.fromLTWH(node.position.dx, node.position.dy, nodeSize.width, nodeSize.height);
-      canvas.drawRect(rect, rectPaint);
-      canvas.drawRect(rect, borderPaint);
-      _drawLabel(canvas, node.label, node.position, nodeSize.width);
-    }
+    for (var edge in edges) {
+      final from = nodes.firstWhere((n) => n.id == edge.fromId).position;
+      final to = nodes.firstWhere((n) => n.id == edge.toId).position;
 
-    // 矢印：単純に前のノードと繋ぐ（上下接続）
-    for (int i = 0; i < nodes.length - 1; i++) {
-      final from = nodes[i].position.translate(nodeSize.width / 2, nodeSize.height);
-      final to = nodes[i + 1].position.translate(nodeSize.width / 2, 0);
-      canvas.drawLine(from, to, arrowPaint);
+      final start = from + const Offset(50, 60); // ノード中央
+      final end = to + const Offset(50, 0);
+      canvas.drawLine(start, end, paint);
     }
-  }
-
-  void _drawLabel(Canvas canvas, String text, Offset offset, double width) {
-    final textSpan = TextSpan(
-      text: text,
-      style: const TextStyle(color: Colors.black, fontSize: 14),
-    );
-    final textPainter = TextPainter(
-      text: textSpan,
-      textAlign: TextAlign.center,
-      textDirection: TextDirection.ltr,
-    );
-    textPainter.layout(minWidth: width, maxWidth: width);
-    textPainter.paint(canvas, offset.translate(0, 20));
   }
 
   @override
-  bool shouldRepaint(covariant GsnPainter oldDelegate) {
-    return oldDelegate.nodes != nodes;
-  }
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
