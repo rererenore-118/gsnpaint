@@ -119,7 +119,7 @@ class _GsnEditorState extends State<GsnEditor> {
     ..setAttribute("download", "gsn_data.json")
     ..click();
   html.Url.revokeObjectUrl(url);
-}
+
   }
 
   @override
