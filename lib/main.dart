@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:html' as html;
-import 'dart:math' as math;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MaterialApp(home: GsnEditor()));
 
@@ -24,13 +24,30 @@ class GsnNode {
     String? label,
   }) : label = label ?? type.name.toUpperCase();
 
+  // ★ JSONからオブジェクトを復元するためのファクトリコンストラクタ
+  factory GsnNode.fromJson(Map<String, dynamic> json) {
+    return GsnNode(
+      id: json['id'],
+      type: GsnNodeType.values.firstWhere(
+        (e) => _gsnTypeName(e) == json['gsn_type'],
+        orElse: () => GsnNodeType.goal, // 見つからない場合のデフォルト値
+      ),
+      position: Offset(json['position_x'], json['position_y']),
+      width: json['width'] ?? 100,
+      height: json['height'] ?? 60,
+      label: json['description'],
+    );
+  }
+
+  // ★ 永続化のために位置とサイズも保存するよう修正
   Map<String, dynamic> toJson() => {
         'id': id,
         'gsn_type': _gsnTypeName(type),
         'description': label,
-        // （必要ならサイズも保存する場合は下の2行を追加）
-        // 'w': width,
-        // 'h': height,
+        'position_x': position.dx,
+        'position_y': position.dy,
+        'width': width,
+        'height': height,
       };
 
   static String _gsnTypeName(GsnNodeType t) {
@@ -55,6 +72,11 @@ class GsnEdge {
   final int fromId;
   final int toId;
   GsnEdge(this.fromId, this.toId);
+
+  // ★ JSONからオブジェクトを復元するためのファクトリコンストラクタ
+  factory GsnEdge.fromJson(Map<String, dynamic> json) {
+    return GsnEdge(json['from'], json['to']);
+  }
 
   Map<String, dynamic> toJson() => {'from': fromId, 'to': toId};
 }
@@ -83,8 +105,48 @@ class _GsnEditorState extends State<GsnEditor> {
   static const double _maxW = 800;
   static const double _maxH = 600;
 
+  // ★ アプリ起動時にデータを読み込む
+  @override
+  void initState() {
+    super.initState();
+    _loadFromLocalStorage();
+  }
+
+  // ★========== データ永続化処理 ==========★
+  Future<void> _saveToLocalStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = {
+      'nodes': _nodes.map((n) => n.toJson()).toList(),
+      'edges': _edges.map((e) => e.toJson()).toList(),
+      'nodeCounter': _nodeCounter,
+    };
+    final jsonString = jsonEncode(data);
+    await prefs.setString('gsn_editor_data', jsonString);
+  }
+
+  Future<void> _loadFromLocalStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jsonString = prefs.getString('gsn_editor_data');
+    if (jsonString == null) return;
+
+    try {
+      final data = jsonDecode(jsonString);
+      setState(() {
+        _nodes.clear();
+        _edges.clear();
+        _nodes.addAll(
+            (data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
+        _edges.addAll(
+            (data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
+        _nodeCounter = data['nodeCounter'] ?? 0;
+      });
+    } catch (e) {
+      print("データの読み込みに失敗しました: $e");
+    }
+  }
+  // ★====================================★
+
   void _addNode(GsnNodeType type) {
-    // いま見えている画面中心
     final viewSize = MediaQuery.of(context).size;
     final sceneCenter =
         _tc.toScene(Offset(viewSize.width / 2, viewSize.height / 2));
@@ -95,6 +157,7 @@ class _GsnEditorState extends State<GsnEditor> {
         position: sceneCenter,
       ));
     });
+    _saveToLocalStorage(); // ★保存
   }
 
   void _toggleDeleteMode() {
@@ -106,12 +169,16 @@ class _GsnEditorState extends State<GsnEditor> {
       _confirmDeleteNode(node);
     } else {
       if (_connecting == null) {
-        _connecting = node.id;
+        setState(() => _connecting = node.id);
       } else if (_connecting != node.id) {
         setState(() {
           _edges.add(GsnEdge(_connecting!, node.id));
           _connecting = null;
         });
+        _saveToLocalStorage(); // ★保存
+      } else {
+        // 同じノードを再度タップした場合は接続モードを解除
+        setState(() => _connecting = null);
       }
     }
   }
@@ -133,6 +200,7 @@ class _GsnEditorState extends State<GsnEditor> {
                     (e) => e.fromId == node.id || e.toId == node.id);
               });
               Navigator.pop(ctx);
+              _saveToLocalStorage(); // ★保存
             },
             child: const Text('削除'),
           ),
@@ -154,6 +222,7 @@ class _GsnEditorState extends State<GsnEditor> {
             onPressed: () {
               setState(() => _edges.remove(edge));
               Navigator.pop(ctx);
+              _saveToLocalStorage(); // ★保存
             },
             child: const Text('削除'),
           ),
@@ -169,8 +238,8 @@ class _GsnEditorState extends State<GsnEditor> {
         title: const Text('GSNエディタ'),
         actions: [
           IconButton(
-            icon:
-                Icon(_deleteMode ? Icons.delete_forever : Icons.delete_outline),
+            icon: Icon(
+                _deleteMode ? Icons.delete_forever : Icons.delete_outline),
             onPressed: _toggleDeleteMode,
             tooltip: '削除モード切替',
           ),
@@ -178,11 +247,16 @@ class _GsnEditorState extends State<GsnEditor> {
             onSelected: _addNode,
             itemBuilder: (_) => const [
               PopupMenuItem(value: GsnNodeType.goal, child: Text('Goal')),
-              PopupMenuItem(value: GsnNodeType.strategy, child: Text('Strategy')),
-              PopupMenuItem(value: GsnNodeType.evidence, child: Text('Evidence')),
-              PopupMenuItem(value: GsnNodeType.context, child: Text('Context')),
-              PopupMenuItem(value: GsnNodeType.assumption, child: Text('Assumption')),
-              PopupMenuItem(value: GsnNodeType.undeveloped, child: Text('Undeveloped')),
+              PopupMenuItem(
+                  value: GsnNodeType.strategy, child: Text('Strategy')),
+              PopupMenuItem(
+                  value: GsnNodeType.evidence, child: Text('Evidence')),
+              PopupMenuItem(
+                  value: GsnNodeType.context, child: Text('Context')),
+              PopupMenuItem(
+                  value: GsnNodeType.assumption, child: Text('Assumption')),
+              PopupMenuItem(
+                  value: GsnNodeType.undeveloped, child: Text('Undeveloped')),
             ],
             icon: const Icon(Icons.add_box),
             tooltip: 'ノード追加',
@@ -193,18 +267,20 @@ class _GsnEditorState extends State<GsnEditor> {
               tooltip: 'JSON保存'),
         ],
       ),
-
-      // キャンバス領域
       body: GestureDetector(
-        // キャンバスのタップ（エッジ削除ヒットテスト用）
         onTapDown: (e) {
-          if (_deleteMode) return;
-          final sceneP = _tc.toScene(e.localPosition); // ビューポート→シーン
-          for (var edge in List.from(_edges)) {
-            final hit = _hitTestEdge(sceneP, edge);
-            if (hit) {
-              _confirmDeleteEdge(edge);
-              break;
+          final sceneP = _tc.toScene(e.localPosition);
+          if (_deleteMode) {
+             // 削除モード時はエッジ削除しない
+          } else if (_connecting != null) {
+            // 接続モード中にキャンバスをタップしたら解除
+            setState(() => _connecting = null);
+          } else {
+            for (var edge in List.from(_edges)) {
+              if (_hitTestEdge(sceneP, edge)) {
+                _confirmDeleteEdge(edge);
+                break;
+              }
             }
           }
         },
@@ -214,40 +290,50 @@ class _GsnEditorState extends State<GsnEditor> {
           maxScale: 4,
           panEnabled: true,
           scaleEnabled: true,
-          constrained: false, // 無限キャンバス化
+          constrained: false,
           boundaryMargin: const EdgeInsets.all(2000),
           child: SizedBox(
             width: _worldSize.width,
             height: _worldSize.height,
             child: Stack(
               children: [
-                // エッジレイヤ
                 Positioned.fill(
                   child: CustomPaint(
-                    painter: GsnEdgePainter(_nodes, _edges),
+                    painter: GsnEdgePainter(_nodes, _edges, connectingId: _connecting),
                   ),
                 ),
-                // ノードレイヤ（見た目は元のまま + 右下リサイズハンドル）
                 ..._nodes.map((node) {
+                  final isConnecting = _connecting == node.id;
                   return Positioned(
                     left: node.position.dx,
                     top: node.position.dy,
                     child: GestureDetector(
                       onTap: () => _handleTapNode(node),
-
-                      // ドラッグ（移動）はズーム倍率に追従
                       onPanUpdate: (d) {
                         final scale = _tc.value.getMaxScaleOnAxis();
                         setState(() => node.position += d.delta / scale);
                       },
-
+                      onPanEnd: (d) => _saveToLocalStorage(), // ★ドラッグ終了時に保存
                       onDoubleTap: () => !_deleteMode ? _editLabel(node) : null,
                       child: Stack(
                         clipBehavior: Clip.none,
                         children: [
-                          _buildShape(node), // 見た目そのまま
-
-                          // 削除ボタン（削除モード時のみ）
+                          // 接続元ノードをハイライト
+                          if (isConnecting)
+                             Container(
+                                width: node.width,
+                                height: node.height,
+                                decoration: BoxDecoration(
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.blue.withOpacity(0.8),
+                                      blurRadius: 10,
+                                      spreadRadius: 4,
+                                    )
+                                  ]
+                                ),
+                             ),
+                          _buildShape(node),
                           if (_deleteMode)
                             Positioned(
                               right: -8,
@@ -258,8 +344,6 @@ class _GsnEditorState extends State<GsnEditor> {
                                 onPressed: () => _confirmDeleteNode(node),
                               ),
                             ),
-
-                          // ★ 右下リサイズハンドル
                           Positioned(
                             right: -8,
                             bottom: -8,
@@ -267,15 +351,13 @@ class _GsnEditorState extends State<GsnEditor> {
                               onDrag: (dx, dy) {
                                 final scale = _tc.value.getMaxScaleOnAxis();
                                 setState(() {
-                                  final nw = (node.width + dx / scale)
+                                  node.width = (node.width + dx / scale)
                                       .clamp(_minW, _maxW);
-                                  final nh = (node.height + dy / scale)
+                                  node.height = (node.height + dy / scale)
                                       .clamp(_minH, _maxH);
-                                  node
-                                    ..width = nw
-                                    ..height = nh;
                                 });
                               },
+                              onDragEnd: () => _saveToLocalStorage(), // ★リサイズ終了時に保存
                             ),
                           ),
                         ],
@@ -291,21 +373,22 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
-  // p はシーン座標で受ける
   bool _hitTestEdge(Offset p, GsnEdge edge) {
- 
-    final a = _nodes.firstWhere((n) => n.id == edge.fromId).position +
-        const Offset(50, 60);
-    final b = _nodes.firstWhere((n) => n.id == edge.toId).position +
-        const Offset(50, 0);
-    return _pointLineDistance(p, a, b) < 10;
+    try {
+      final fromNode = _nodes.firstWhere((n) => n.id == edge.fromId);
+      final toNode = _nodes.firstWhere((n) => n.id == edge.toId);
+      final a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
+      final b = toNode.position + Offset(toNode.width / 2, 0);
+      return _pointLineDistance(p, a, b) < 10;
+    } catch (e) {
+      return false; // ノードが見つからない場合はヒットしない
+    }
   }
 
   double _pointLineDistance(Offset p, Offset a, Offset b) {
     final l2 = (b - a).distanceSquared;
     if (l2 == 0) return (p - a).distance;
-    var t =
-        ((p - a).dx * (b - a).dx + (p - a).dy * (b - a).dy) / l2;
+    var t = ((p - a).dx * (b - a).dx + (p - a).dy * (b - a).dy) / l2;
     t = t.clamp(0, 1);
     final proj = a + (b - a) * t;
     return (p - proj).distance;
@@ -317,14 +400,17 @@ class _GsnEditorState extends State<GsnEditor> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('ノード名編集'),
-        content: TextField(controller: ctl),
+        content: TextField(controller: ctl, autofocus: true),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('キャンセル')),
           TextButton(
             onPressed: () {
-              setState(() => node.label = ctl.text);
+              if (ctl.text.isNotEmpty) {
+                setState(() => node.label = ctl.text);
+                _saveToLocalStorage(); // ★保存
+              }
               Navigator.pop(context);
             },
             child: const Text('保存'),
@@ -349,13 +435,17 @@ class _GsnEditorState extends State<GsnEditor> {
     html.Url.revokeObjectUrl(url);
   }
 
-  
   Widget _buildShape(GsnNode node) {
     final label = Center(
-      child: Text(
-        node.label,
-        textAlign: TextAlign.center,
-        style: const TextStyle(fontWeight: FontWeight.bold),
+      child: Padding(
+        padding: const EdgeInsets.all(4.0),
+        child: Text(
+          node.label,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+          overflow: TextOverflow.ellipsis,
+          maxLines: 5,
+        ),
       ),
     );
     switch (node.type) {
@@ -364,13 +454,13 @@ class _GsnEditorState extends State<GsnEditor> {
           width: node.width,
           height: node.height,
           decoration:
-              BoxDecoration(color: Colors.lightBlue, border: Border.all()),
+              BoxDecoration(color: Colors.lightBlue.shade100, border: Border.all()),
           child: label,
         );
       case GsnNodeType.strategy:
         return CustomPaint(
           size: Size(node.width, node.height),
-          painter: ParallelogramPainter(Colors.orangeAccent),
+          painter: ParallelogramPainter(Colors.orangeAccent.shade100),
           child:
               SizedBox(width: node.width, height: node.height, child: label),
         );
@@ -379,13 +469,13 @@ class _GsnEditorState extends State<GsnEditor> {
           child: Container(
               width: node.width,
               height: node.height,
-              color: Colors.greenAccent,
+              color: Colors.greenAccent.shade100,
               child: label),
         );
       case GsnNodeType.context:
         return CustomPaint(
           size: Size(node.width, node.height),
-          painter: RoundedRectPainter(Colors.redAccent, 12),
+          painter: RoundedRectPainter(Colors.purple.shade100, 12),
           child:
               SizedBox(width: node.width, height: node.height, child: label),
         );
@@ -393,14 +483,14 @@ class _GsnEditorState extends State<GsnEditor> {
         return Container(
           width: node.width,
           height: node.height,
-          decoration:
-              BoxDecoration(color: Colors.yellowAccent, border: Border.all()),
+          decoration: BoxDecoration(
+              color: Colors.yellowAccent.shade100, border: Border.all()),
           child: label,
         );
       case GsnNodeType.undeveloped:
         return CustomPaint(
           size: Size(node.width, node.height),
-          painter: DiamondPainter(Colors.purple),
+          painter: DiamondPainter(Colors.grey.shade400),
           child:
               SizedBox(width: node.width, height: node.height, child: label),
         );
@@ -410,7 +500,8 @@ class _GsnEditorState extends State<GsnEditor> {
 
 class _ResizeHandle extends StatelessWidget {
   final void Function(double dx, double dy) onDrag;
-  const _ResizeHandle({required this.onDrag});
+  final VoidCallback onDragEnd;
+  const _ResizeHandle({required this.onDrag, required this.onDragEnd});
 
   @override
   Widget build(BuildContext context) {
@@ -419,6 +510,7 @@ class _ResizeHandle extends StatelessWidget {
       child: GestureDetector(
         behavior: HitTestBehavior.translucent,
         onPanUpdate: (d) => onDrag(d.delta.dx, d.delta.dy),
+        onPanEnd: (d) => onDragEnd(), // ★ドラッグ終了イベント
         child: Container(
           width: 16,
           height: 16,
@@ -428,7 +520,7 @@ class _ResizeHandle extends StatelessWidget {
             borderRadius: BorderRadius.circular(3),
             boxShadow: const [BoxShadow(blurRadius: 1, spreadRadius: 0)],
           ),
-          child: const Icon(Icons.drag_handle, size: 12),
+          child: const Icon(Icons.drag_handle, size: 12, color: Colors.black54),
         ),
       ),
     );
@@ -438,7 +530,8 @@ class _ResizeHandle extends StatelessWidget {
 class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
-  GsnEdgePainter(this.nodes, this.edges);
+  final int? connectingId;
+  GsnEdgePainter(this.nodes, this.edges, {this.connectingId});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -446,23 +539,32 @@ class GsnEdgePainter extends CustomPainter {
       ..color = Colors.black
       ..strokeWidth = 2;
     final arrowPaint = Paint()..color = Colors.black;
+
     for (var e in edges) {
-      final a = nodes.firstWhere((n) => n.id == e.fromId).position +
-          const Offset(50, 60);
-      final b = nodes.firstWhere((n) => n.id == e.toId).position +
-          const Offset(50, 0);
-      canvas.drawLine(a, b, paint);
-      const s = 10.0;
-      final dir = (b - a).normalize();
-      final perp = Offset(-dir.dy, dir.dx);
-      final p1 = b - dir * s + perp * (s / 2);
-      final p2 = b - dir * s - perp * (s / 2);
-      final path = Path()
-        ..moveTo(b.dx, b.dy)
-        ..lineTo(p1.dx, p1.dy)
-        ..lineTo(p2.dx, p2.dy)
-        ..close();
-      canvas.drawPath(path, arrowPaint);
+      try {
+        final fromNode = nodes.firstWhere((n) => n.id == e.fromId);
+        final toNode = nodes.firstWhere((n) => n.id == e.toId);
+
+        final a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
+        final b = toNode.position + Offset(toNode.width / 2, 0);
+
+        canvas.drawLine(a, b, paint);
+
+        const s = 10.0;
+        final dir = (b - a).normalize();
+        if (dir.distance == 0) continue;
+        final perp = Offset(-dir.dy, dir.dx);
+        final p1 = b - dir * s + perp * (s / 2);
+        final p2 = b - dir * s - perp * (s / 2);
+        final path = Path()
+          ..moveTo(b.dx, b.dy)
+          ..lineTo(p1.dx, p1.dy)
+          ..lineTo(p2.dx, p2.dy)
+          ..close();
+        canvas.drawPath(path, arrowPaint);
+      } catch (err) {
+        // ノードが見つからない場合はスキップ
+      }
     }
   }
 
@@ -477,6 +579,7 @@ class ParallelogramPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..color = color;
+    final borderPaint = Paint()..color = Colors.black..strokeWidth = 1..style = PaintingStyle.stroke;
     final offset = size.width * 0.2;
     final path = Path()
       ..moveTo(offset, 0)
@@ -485,6 +588,7 @@ class ParallelogramPainter extends CustomPainter {
       ..lineTo(0, size.height)
       ..close();
     canvas.drawPath(path, paint);
+    canvas.drawPath(path, borderPaint);
   }
 
   @override
@@ -499,11 +603,13 @@ class RoundedRectPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..color = color;
+    final borderPaint = Paint()..color = Colors.black..strokeWidth = 1..style = PaintingStyle.stroke;
     final rect = RRect.fromRectAndRadius(
       Rect.fromLTWH(0, 0, size.width, size.height),
       Radius.circular(radius),
     );
     canvas.drawRRect(rect, paint);
+    canvas.drawRRect(rect, borderPaint);
   }
 
   @override
@@ -517,6 +623,7 @@ class DiamondPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..color = color;
+    final borderPaint = Paint()..color = Colors.black..strokeWidth = 1..style = PaintingStyle.stroke;
     final path = Path()
       ..moveTo(size.width / 2, 0)
       ..lineTo(size.width, size.height / 2)
@@ -524,6 +631,7 @@ class DiamondPainter extends CustomPainter {
       ..lineTo(0, size.height / 2)
       ..close();
     canvas.drawPath(path, paint);
+    canvas.drawPath(path, borderPaint);
   }
 
   @override
