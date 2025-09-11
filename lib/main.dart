@@ -24,13 +24,12 @@ class GsnNode {
     String? label,
   }) : label = label ?? type.name.toUpperCase();
 
-  // ★ JSONからオブジェクトを復元するためのファクトリコンストラクタ
   factory GsnNode.fromJson(Map<String, dynamic> json) {
     return GsnNode(
       id: json['id'],
       type: GsnNodeType.values.firstWhere(
         (e) => _gsnTypeName(e) == json['gsn_type'],
-        orElse: () => GsnNodeType.goal, // 見つからない場合のデフォルト値
+        orElse: () => GsnNodeType.goal,
       ),
       position: Offset(json['position_x'], json['position_y']),
       width: json['width'] ?? 100,
@@ -39,7 +38,6 @@ class GsnNode {
     );
   }
 
-  // ★ 永続化のために位置とサイズも保存するよう修正
   Map<String, dynamic> toJson() => {
         'id': id,
         'gsn_type': _gsnTypeName(type),
@@ -73,7 +71,6 @@ class GsnEdge {
   final int toId;
   GsnEdge(this.fromId, this.toId);
 
-  // ★ JSONからオブジェクトを復元するためのファクトリコンストラクタ
   factory GsnEdge.fromJson(Map<String, dynamic> json) {
     return GsnEdge(json['from'], json['to']);
   }
@@ -89,9 +86,8 @@ class GsnEditor extends StatefulWidget {
 }
 
 class _GsnEditorState extends State<GsnEditor> {
-  // パン／ズーム用
   final TransformationController _tc = TransformationController();
-  final Size _worldSize = const Size(4000, 4000); // 広いキャンバス
+  final Size _worldSize = const Size(4000, 4000);
 
   final List<GsnNode> _nodes = [];
   final List<GsnEdge> _edges = [];
@@ -99,20 +95,17 @@ class _GsnEditorState extends State<GsnEditor> {
   bool _deleteMode = false;
   int? _connecting;
 
-  // リサイズ制約
   static const double _minW = 60;
   static const double _minH = 40;
   static const double _maxW = 800;
   static const double _maxH = 600;
 
-  // ★ アプリ起動時にデータを読み込む
   @override
   void initState() {
     super.initState();
     _loadFromLocalStorage();
   }
 
-  // ★========== データ永続化処理 ==========★
   Future<void> _saveToLocalStorage() async {
     final prefs = await SharedPreferences.getInstance();
     final data = {
@@ -144,20 +137,17 @@ class _GsnEditorState extends State<GsnEditor> {
       print("データの読み込みに失敗しました: $e");
     }
   }
-  // ★====================================★
 
-  void _addNode(GsnNodeType type) {
-    final viewSize = MediaQuery.of(context).size;
-    final sceneCenter =
-        _tc.toScene(Offset(viewSize.width / 2, viewSize.height / 2));
+  // ★ 修正: ドロップされた位置(Offset)を引数で受け取るように変更
+  void _addNode(GsnNodeType type, Offset position) {
     setState(() {
       _nodes.add(GsnNode(
         id: _nodeCounter++,
         type: type,
-        position: sceneCenter,
+        position: position,
       ));
     });
-    _saveToLocalStorage(); // ★保存
+    _saveToLocalStorage();
   }
 
   void _toggleDeleteMode() {
@@ -175,9 +165,8 @@ class _GsnEditorState extends State<GsnEditor> {
           _edges.add(GsnEdge(_connecting!, node.id));
           _connecting = null;
         });
-        _saveToLocalStorage(); // ★保存
+        _saveToLocalStorage();
       } else {
-        // 同じノードを再度タップした場合は接続モードを解除
         setState(() => _connecting = null);
       }
     }
@@ -200,7 +189,7 @@ class _GsnEditorState extends State<GsnEditor> {
                     (e) => e.fromId == node.id || e.toId == node.id);
               });
               Navigator.pop(ctx);
-              _saveToLocalStorage(); // ★保存
+              _saveToLocalStorage();
             },
             child: const Text('削除'),
           ),
@@ -222,7 +211,7 @@ class _GsnEditorState extends State<GsnEditor> {
             onPressed: () {
               setState(() => _edges.remove(edge));
               Navigator.pop(ctx);
-              _saveToLocalStorage(); // ★保存
+              _saveToLocalStorage();
             },
             child: const Text('削除'),
           ),
@@ -243,132 +232,138 @@ class _GsnEditorState extends State<GsnEditor> {
             onPressed: _toggleDeleteMode,
             tooltip: '削除モード切替',
           ),
-          PopupMenuButton<GsnNodeType>(
-            onSelected: _addNode,
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: GsnNodeType.goal, child: Text('Goal')),
-              PopupMenuItem(
-                  value: GsnNodeType.strategy, child: Text('Strategy')),
-              PopupMenuItem(
-                  value: GsnNodeType.evidence, child: Text('Evidence')),
-              PopupMenuItem(
-                  value: GsnNodeType.context, child: Text('Context')),
-              PopupMenuItem(
-                  value: GsnNodeType.assumption, child: Text('Assumption')),
-              PopupMenuItem(
-                  value: GsnNodeType.undeveloped, child: Text('Undeveloped')),
-            ],
-            icon: const Icon(Icons.add_box),
-            tooltip: 'ノード追加',
-          ),
           IconButton(
               onPressed: _exportJson,
               icon: const Icon(Icons.save_alt),
               tooltip: 'JSON保存'),
         ],
       ),
-      body: GestureDetector(
-        onTapDown: (e) {
-          final sceneP = _tc.toScene(e.localPosition);
-          if (_deleteMode) {
-             // 削除モード時はエッジ削除しない
-          } else if (_connecting != null) {
-            // 接続モード中にキャンバスをタップしたら解除
-            setState(() => _connecting = null);
-          } else {
-            for (var edge in List.from(_edges)) {
-              if (_hitTestEdge(sceneP, edge)) {
-                _confirmDeleteEdge(edge);
-                break;
-              }
-            }
-          }
-        },
-        child: InteractiveViewer(
-          transformationController: _tc,
-          minScale: 0.25,
-          maxScale: 4,
-          panEnabled: true,
-          scaleEnabled: true,
-          constrained: false,
-          boundaryMargin: const EdgeInsets.all(2000),
-          child: SizedBox(
-            width: _worldSize.width,
-            height: _worldSize.height,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: CustomPaint(
-                    painter: GsnEdgePainter(_nodes, _edges, connectingId: _connecting),
-                  ),
-                ),
-                ..._nodes.map((node) {
-                  final isConnecting = _connecting == node.id;
-                  return Positioned(
-                    left: node.position.dx,
-                    top: node.position.dy,
-                    child: GestureDetector(
-                      onTap: () => _handleTapNode(node),
-                      onPanUpdate: (d) {
-                        final scale = _tc.value.getMaxScaleOnAxis();
-                        setState(() => node.position += d.delta / scale);
-                      },
-                      onPanEnd: (d) => _saveToLocalStorage(), // ★ドラッグ終了時に保存
-                      onDoubleTap: () => !_deleteMode ? _editLabel(node) : null,
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          // 接続元ノードをハイライト
-                          if (isConnecting)
-                             Container(
-                                width: node.width,
-                                height: node.height,
-                                decoration: BoxDecoration(
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.blue.withOpacity(0.8),
-                                      blurRadius: 10,
-                                      spreadRadius: 4,
-                                    )
-                                  ]
-                                ),
-                             ),
-                          _buildShape(node),
-                          if (_deleteMode)
-                            Positioned(
-                              right: -8,
-                              top: -8,
-                              child: IconButton(
-                                icon: const Icon(Icons.close,
-                                    size: 16, color: Colors.red),
-                                onPressed: () => _confirmDeleteNode(node),
+      // Stackを使用して、キャンバスとパレットを重ねて表示
+      body: Stack(
+        children: [
+          // DragTargetでキャンバス全体をラップし、ドロップを検知
+          DragTarget<GsnNodeType>(
+            builder: (context, candidateData, rejectedData) {
+              return GestureDetector(
+                onTapDown: (e) {
+                  final sceneP = _tc.toScene(e.localPosition);
+                  if (_deleteMode) {
+                  } else if (_connecting != null) {
+                    setState(() => _connecting = null);
+                  } else {
+                    for (var edge in List.from(_edges)) {
+                      if (_hitTestEdge(sceneP, edge)) {
+                        _confirmDeleteEdge(edge);
+                        break;
+                      }
+                    }
+                  }
+                },
+                child: InteractiveViewer(
+                  transformationController: _tc,
+                  minScale: 0.25,
+                  maxScale: 4,
+                  panEnabled: true,
+                  scaleEnabled: true,
+                  constrained: false,
+                  boundaryMargin: const EdgeInsets.all(2000),
+                  child: SizedBox(
+                    width: _worldSize.width,
+                    height: _worldSize.height,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: GsnEdgePainter(_nodes, _edges,
+                                connectingId: _connecting),
+                          ),
+                        ),
+                        ..._nodes.map((node) {
+                          final isConnecting = _connecting == node.id;
+                          return Positioned(
+                            left: node.position.dx,
+                            top: node.position.dy,
+                            child: GestureDetector(
+                              onTap: () => _handleTapNode(node),
+                              onPanUpdate: (d) {
+                                final scale = _tc.value.getMaxScaleOnAxis();
+                                setState(() => node.position += d.delta / scale);
+                              },
+                              onPanEnd: (d) => _saveToLocalStorage(),
+                              onDoubleTap: () =>
+                                  !_deleteMode ? _editLabel(node) : null,
+                              child: Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  if (isConnecting)
+                                    Container(
+                                      width: node.width,
+                                      height: node.height,
+                                      decoration: BoxDecoration(boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.blue.withOpacity(0.8),
+                                          blurRadius: 10,
+                                          spreadRadius: 4,
+                                        )
+                                      ]),
+                                    ),
+                                  // ★ 変更: 汎用的なウィジェットビルダー関数を呼び出す
+                                  _buildGsnShapeWidget(node),
+                                  if (_deleteMode)
+                                    Positioned(
+                                      right: -8,
+                                      top: -8,
+                                      child: IconButton(
+                                        icon: const Icon(Icons.close,
+                                            size: 16, color: Colors.red),
+                                        onPressed: () =>
+                                            _confirmDeleteNode(node),
+                                      ),
+                                    ),
+                                  Positioned(
+                                    right: -8,
+                                    bottom: -8,
+                                    child: _ResizeHandle(
+                                      onDrag: (dx, dy) {
+                                        final scale =
+                                            _tc.value.getMaxScaleOnAxis();
+                                        setState(() {
+                                          node.width = (node.width + dx / scale)
+                                              .clamp(_minW, _maxW);
+                                          node.height =
+                                              (node.height + dy / scale)
+                                                  .clamp(_minH, _maxH);
+                                        });
+                                      },
+                                      onDragEnd: () => _saveToLocalStorage(),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          Positioned(
-                            right: -8,
-                            bottom: -8,
-                            child: _ResizeHandle(
-                              onDrag: (dx, dy) {
-                                final scale = _tc.value.getMaxScaleOnAxis();
-                                setState(() {
-                                  node.width = (node.width + dx / scale)
-                                      .clamp(_minW, _maxW);
-                                  node.height = (node.height + dy / scale)
-                                      .clamp(_minH, _maxH);
-                                });
-                              },
-                              onDragEnd: () => _saveToLocalStorage(), // ★リサイズ終了時に保存
-                            ),
-                          ),
-                        ],
-                      ),
+                          );
+                        }),
+                      ],
                     ),
-                  );
-                }),
-              ],
-            ),
+                  ),
+                ),
+              );
+            },
+            // ドロップされた際の処理
+            onAcceptWithDetails: (details) {
+              // スクリーン座標をキャンバスのワールド座標に変換
+              final scenePosition = _tc.toScene(details.offset);
+              // 変換した座標にノードを追加
+              _addNode(details.data, scenePosition);
+            },
           ),
-        ),
+          // 画面左上にノードパレットを配置
+          const Positioned(
+            top: 10,
+            left: 10,
+            child: GsnPalette(),
+          ),
+        ],
       ),
     );
   }
@@ -381,7 +376,7 @@ class _GsnEditorState extends State<GsnEditor> {
       final b = toNode.position + Offset(toNode.width / 2, 0);
       return _pointLineDistance(p, a, b) < 10;
     } catch (e) {
-      return false; // ノードが見つからない場合はヒットしない
+      return false;
     }
   }
 
@@ -409,7 +404,7 @@ class _GsnEditorState extends State<GsnEditor> {
             onPressed: () {
               if (ctl.text.isNotEmpty) {
                 setState(() => node.label = ctl.text);
-                _saveToLocalStorage(); // ★保存
+                _saveToLocalStorage();
               }
               Navigator.pop(context);
             },
@@ -434,69 +429,136 @@ class _GsnEditorState extends State<GsnEditor> {
       ..click();
     html.Url.revokeObjectUrl(url);
   }
+}
 
-  Widget _buildShape(GsnNode node) {
-    final label = Center(
+// GSNノードの形状を描画する汎用的なウィジェットビルダー関数
+// パレットとキャンバスの両方から利用できるように、Stateクラスの外に定義
+Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
+  final label = Center(
+    child: Padding(
+      padding: const EdgeInsets.all(4.0),
+      child: Text(
+        node.label,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontWeight: FontWeight.bold,
+          // パレット用はフォントを少し小さくする
+          fontSize: isPalette ? 10 : 12,
+        ),
+        overflow: TextOverflow.ellipsis,
+        maxLines: 5,
+      ),
+    ),
+  );
+  switch (node.type) {
+    case GsnNodeType.goal:
+      return Container(
+        width: node.width,
+        height: node.height,
+        decoration:
+            BoxDecoration(color: Colors.lightBlue.shade100, border: Border.all()),
+        child: label,
+      );
+    case GsnNodeType.strategy:
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: ParallelogramPainter(Colors.orangeAccent.shade100),
+        child: SizedBox(width: node.width, height: node.height, child: label),
+      );
+    case GsnNodeType.evidence:
+      return ClipOval(
+        child: Container(
+            width: node.width,
+            height: node.height,
+            color: Colors.greenAccent.shade100,
+            child: label),
+      );
+    case GsnNodeType.context:
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: RoundedRectPainter(Colors.purple.shade100, 12),
+        child: SizedBox(width: node.width, height: node.height, child: label),
+      );
+    case GsnNodeType.assumption:
+      return Container(
+        width: node.width,
+        height: node.height,
+        decoration: BoxDecoration(
+            color: Colors.yellowAccent.shade100, border: Border.all()),
+        child: label,
+      );
+    case GsnNodeType.undeveloped:
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: DiamondPainter(Colors.grey.shade400),
+        child: SizedBox(width: node.width, height: node.height, child: label),
+      );
+  }
+}
+
+
+// ドラッグ＆ドロップ用のノードパレットウィジェット
+class GsnPalette extends StatelessWidget {
+  const GsnPalette({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Cardで囲んで見やすくする
+    return Card(
+      elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(4.0),
-        child: Text(
-          node.label,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-          overflow: TextOverflow.ellipsis,
-          maxLines: 5,
+        padding: const EdgeInsets.all(8.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: GsnNodeType.values
+              .map((type) => _PaletteItem(type: type))
+              .toList(),
         ),
       ),
     );
-    switch (node.type) {
-      case GsnNodeType.goal:
-        return Container(
-          width: node.width,
-          height: node.height,
-          decoration:
-              BoxDecoration(color: Colors.lightBlue.shade100, border: Border.all()),
-          child: label,
-        );
-      case GsnNodeType.strategy:
-        return CustomPaint(
-          size: Size(node.width, node.height),
-          painter: ParallelogramPainter(Colors.orangeAccent.shade100),
-          child:
-              SizedBox(width: node.width, height: node.height, child: label),
-        );
-      case GsnNodeType.evidence:
-        return ClipOval(
-          child: Container(
-              width: node.width,
-              height: node.height,
-              color: Colors.greenAccent.shade100,
-              child: label),
-        );
-      case GsnNodeType.context:
-        return CustomPaint(
-          size: Size(node.width, node.height),
-          painter: RoundedRectPainter(Colors.purple.shade100, 12),
-          child:
-              SizedBox(width: node.width, height: node.height, child: label),
-        );
-      case GsnNodeType.assumption:
-        return Container(
-          width: node.width,
-          height: node.height,
-          decoration: BoxDecoration(
-              color: Colors.yellowAccent.shade100, border: Border.all()),
-          child: label,
-        );
-      case GsnNodeType.undeveloped:
-        return CustomPaint(
-          size: Size(node.width, node.height),
-          painter: DiamondPainter(Colors.grey.shade400),
-          child:
-              SizedBox(width: node.width, height: node.height, child: label),
-        );
-    }
   }
 }
+
+// パレット内の各ノードアイテム
+class _PaletteItem extends StatelessWidget {
+  final GsnNodeType type;
+  const _PaletteItem({required this.type});
+
+  @override
+  Widget build(BuildContext context) {
+    // パレットに表示するためのダミーノードを作成
+    final nodeForPalette = GsnNode(
+      id: -1,
+      type: type,
+      position: Offset.zero,
+      width: 80, // パレット内のサイズは固定
+      height: 48,
+      label: GsnNode._gsnTypeName(type),
+    );
+
+    // パレットに表示するウィジェット
+    final child = _buildGsnShapeWidget(nodeForPalette, isPalette: true);
+
+    // Draggableウィジェットでラップして、ドラッグ可能にする
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Draggable<GsnNodeType>(
+        // ドラッグするデータ（ノード種別）
+        data: type,
+        // ドラッグ中にカーソル下に表示されるウィジェット
+        feedback: Material(
+          elevation: 4.0,
+          color: Colors.transparent,
+          child: child,
+        ),
+        // パレットに残る元のウィジェット
+        child: child,
+      ),
+    );
+  }
+}
+
 
 class _ResizeHandle extends StatelessWidget {
   final void Function(double dx, double dy) onDrag;
@@ -510,7 +572,7 @@ class _ResizeHandle extends StatelessWidget {
       child: GestureDetector(
         behavior: HitTestBehavior.translucent,
         onPanUpdate: (d) => onDrag(d.delta.dx, d.delta.dy),
-        onPanEnd: (d) => onDragEnd(), // ★ドラッグ終了イベント
+        onPanEnd: (d) => onDragEnd(),
         child: Container(
           width: 16,
           height: 16,
@@ -563,7 +625,7 @@ class GsnEdgePainter extends CustomPainter {
           ..close();
         canvas.drawPath(path, arrowPaint);
       } catch (err) {
-        // ノードが見つからない場合はスキップ
+        // Node not found, skip drawing this edge
       }
     }
   }
