@@ -40,6 +40,10 @@ dev_dependencies:
     sdk: flutter
 
   shared_preferences: ^2.2.3
+  google_sign_in: ^6.2.1 # Googleアカウントでのサインイン機能
+  googleapis: ^13.1.0     # Google Drive APIなど様々なGoogle APIを呼び出す
+  googleapis_auth: ^1.6.0 # APIアクセスのための認証処理を助ける
+  extension_google_sign_in_as_googleapis_auth: ^2.0.12 # google_sign_in と googleapis を繋ぐ
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

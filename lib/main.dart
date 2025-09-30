@@ -5,7 +5,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MaterialApp(home: GsnEditor()));
 
-enum GsnNodeType { goal, strategy, evidence, assumption, context, undeveloped }
+enum GsnNodeType {
+  goal,
+  strategy,
+  context,
+  evidence,
+  undeveloped,
+  set,
+  recordAccess,
+  lambda,
+  application,
+  hub,
+  map,
+  stringLiteral,
+  recordLabel,
+  record
+}
 
 class GsnNode {
   final int id;
@@ -22,7 +37,7 @@ class GsnNode {
     this.width = 100,
     this.height = 60,
     String? label,
-  }) : label = label ?? type.name.toUpperCase();
+  }) : label = label ?? _gsnTypeName(type);
 
   factory GsnNode.fromJson(Map<String, dynamic> json) {
     return GsnNode(
@@ -54,14 +69,30 @@ class GsnNode {
         return 'Goal';
       case GsnNodeType.strategy:
         return 'Strategy';
-      case GsnNodeType.evidence:
-        return 'Evidence';
-      case GsnNodeType.assumption:
-        return 'Assumption';
       case GsnNodeType.context:
         return 'Context';
+      case GsnNodeType.evidence:
+        return 'Evidence';
       case GsnNodeType.undeveloped:
         return 'Undeveloped';
+      case GsnNodeType.set:
+        return 'Set';
+      case GsnNodeType.record:
+        return 'Record';
+      case GsnNodeType.recordAccess:
+        return 'RecordAccess';
+      case GsnNodeType.lambda:
+        return 'Lambda';
+      case GsnNodeType.application:
+        return 'Application';
+      case GsnNodeType.hub:
+        return 'Hub';
+      case GsnNodeType.map:
+        return 'Map';
+      case GsnNodeType.stringLiteral:
+        return 'StringLiteral';
+      case GsnNodeType.recordLabel:
+        return 'RecordLabel';
     }
   }
 }
@@ -138,7 +169,6 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  // ★ 修正: ドロップされた位置(Offset)を引数で受け取るように変更
   void _addNode(GsnNodeType type, Offset position) {
     setState(() {
       _nodes.add(GsnNode(
@@ -238,10 +268,8 @@ class _GsnEditorState extends State<GsnEditor> {
               tooltip: 'JSON保存'),
         ],
       ),
-      // Stackを使用して、キャンバスとパレットを重ねて表示
       body: Stack(
         children: [
-          // DragTargetでキャンバス全体をラップし、ドロップを検知
           DragTarget<GsnNodeType>(
             builder: (context, candidateData, rejectedData) {
               return GestureDetector(
@@ -284,6 +312,7 @@ class _GsnEditorState extends State<GsnEditor> {
                             left: node.position.dx,
                             top: node.position.dy,
                             child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
                               onTap: () => _handleTapNode(node),
                               onPanUpdate: (d) {
                                 final scale = _tc.value.getMaxScaleOnAxis();
@@ -307,7 +336,6 @@ class _GsnEditorState extends State<GsnEditor> {
                                         )
                                       ]),
                                     ),
-                                  // ★ 変更: 汎用的なウィジェットビルダー関数を呼び出す
                                   _buildGsnShapeWidget(node),
                                   if (_deleteMode)
                                     Positioned(
@@ -349,15 +377,11 @@ class _GsnEditorState extends State<GsnEditor> {
                 ),
               );
             },
-            // ドロップされた際の処理
             onAcceptWithDetails: (details) {
-              // スクリーン座標をキャンバスのワールド座標に変換
               final scenePosition = _tc.toScene(details.offset);
-              // 変換した座標にノードを追加
               _addNode(details.data, scenePosition);
             },
           ),
-          // 画面左上にノードパレットを配置
           const Positioned(
             top: 10,
             left: 10,
@@ -389,31 +413,39 @@ class _GsnEditorState extends State<GsnEditor> {
     return (p - proj).distance;
   }
 
+  // =======================================================================
+  // ★★★ エラーを修正しました ★★★
+  // =======================================================================
   void _editLabel(GsnNode node) {
     final ctl = TextEditingController(text: node.label);
+
+    // ダイアログで使う関数を先に定義する
+    void submit() {
+      if (ctl.text.isNotEmpty) {
+        setState(() => node.label = ctl.text);
+        _saveToLocalStorage();
+      }
+      Navigator.pop(context);
+    }
+
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('ノード名編集'),
-        content: TextField(controller: ctl, autofocus: true),
+        content: TextField(controller: ctl, autofocus: true, onSubmitted: (_) => submit()),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('キャンセル')),
           TextButton(
-            onPressed: () {
-              if (ctl.text.isNotEmpty) {
-                setState(() => node.label = ctl.text);
-                _saveToLocalStorage();
-              }
-              Navigator.pop(context);
-            },
+            onPressed: submit,
             child: const Text('保存'),
           ),
         ],
       ),
     );
   }
+
 
   void _exportJson() {
     final data = {
@@ -431,25 +463,37 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 }
 
-// GSNノードの形状を描画する汎用的なウィジェットビルダー関数
-// パレットとキャンバスの両方から利用できるように、Stateクラスの外に定義
+// =======================================================================
+// ★★★ 論文の定義に合わせて修正しました ★★★
+// =======================================================================
 Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
+  final labelStyle = TextStyle(
+    fontSize: isPalette ? 10 : 12,
+    fontWeight: FontWeight.bold,
+    color: node.type == GsnNodeType.set || node.type == GsnNodeType.map ? Colors.white : Colors.black,
+  );
+
   final label = Center(
     child: Padding(
-      padding: const EdgeInsets.all(4.0),
+      padding: const EdgeInsets.all(8.0),
       child: Text(
         node.label,
         textAlign: TextAlign.center,
-        style: TextStyle(
-          fontWeight: FontWeight.bold,
-          // パレット用はフォントを少し小さくする
-          fontSize: isPalette ? 10 : 12,
-        ),
+        style: labelStyle,
         overflow: TextOverflow.ellipsis,
-        maxLines: 5,
+        maxLines: isPalette ? 2 : 5,
       ),
     ),
   );
+
+  Widget buildPainter(CustomPainter painter) {
+    return CustomPaint(
+      size: Size(node.width, node.height),
+      painter: painter,
+      child: SizedBox(width: node.width, height: node.height, child: label),
+    );
+  }
+
   switch (node.type) {
     case GsnNodeType.goal:
       return Container(
@@ -460,50 +504,75 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
         child: label,
       );
     case GsnNodeType.strategy:
-      return CustomPaint(
-        size: Size(node.width, node.height),
-        painter: ParallelogramPainter(Colors.orangeAccent.shade100),
-        child: SizedBox(width: node.width, height: node.height, child: label),
-      );
+      return buildPainter(ParallelogramPainter(Colors.orangeAccent.shade100));
     case GsnNodeType.evidence:
-      return ClipOval(
-        child: Container(
-            width: node.width,
-            height: node.height,
-            color: Colors.greenAccent.shade100,
-            child: label),
-      );
-    case GsnNodeType.context:
-      return CustomPaint(
-        size: Size(node.width, node.height),
-        painter: RoundedRectPainter(Colors.purple.shade100, 12),
-        child: SizedBox(width: node.width, height: node.height, child: label),
-      );
-    case GsnNodeType.assumption:
-      return Container(
-        width: node.width,
-        height: node.height,
-        decoration: BoxDecoration(
-            color: Colors.yellowAccent.shade100, border: Border.all()),
-        child: label,
-      );
+      return buildPainter(EvidencePainter());
     case GsnNodeType.undeveloped:
+      return buildPainter(UndevelopedPainter());
+    case GsnNodeType.set:
+      return buildPainter(SetPainter());
+    case GsnNodeType.record:
+      return buildPainter(RecordPainter());
+    case GsnNodeType.lambda:
+      return buildPainter(LambdaPainter());
+    case GsnNodeType.application:
+    // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
+      if (isPalette) {
+        return buildPainter(ApplicationPainter()); // buildPainterはPainterとlabelを両方描画する
+      } else {
+        // CustomPaintを直接使ってPainterのみ描画する
+        return CustomPaint(
+          size: Size(node.width, node.height),
+          painter: ApplicationPainter(),
+        );
+      }
+    case GsnNodeType.hub:
+    // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
+      if (isPalette) {
+        return buildPainter(HubPainter()); // buildPainterはPainterとlabelを両方描画する
+      } else {
+        // CustomPaintを直接使ってPainterのみ描画する
+        return CustomPaint(
+          size: Size(node.width, node.height),
+          painter: HubPainter(),
+        );
+      }
+    case GsnNodeType.map:
+      if (isPalette) {
+        return buildPainter(MapPainter());
+      } else {
+        return CustomPaint(
+          size: Size(node.width, node.height),
+          painter: MapPainter(),
+        );
+      }
+
+    case GsnNodeType.stringLiteral:
+      return label;
+    case GsnNodeType.recordLabel:
+      // CustomPaintを直接使い、painterにnode.labelを渡す
       return CustomPaint(
         size: Size(node.width, node.height),
-        painter: DiamondPainter(Colors.grey.shade400),
-        child: SizedBox(width: node.width, height: node.height, child: label),
+        painter: RecordLabelPainter(label: node.label),
       );
+    case GsnNodeType.recordAccess: // ▼▼▼ ここを以下のように書き換えます ▼▼▼
+      // CustomPaintを直接使い、painterにnode.labelを渡す
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: RecordAccessPainter(label: node.label),
+      );
+
+    case GsnNodeType.context:
+      return buildPainter(RoundedRectPainter(Colors.purple.shade100, 12));
+
   }
 }
 
-
-// ドラッグ＆ドロップ用のノードパレットウィジェット
 class GsnPalette extends StatelessWidget {
   const GsnPalette({super.key});
 
   @override
   Widget build(BuildContext context) {
-    // Cardで囲んで見やすくする
     return Card(
       elevation: 4,
       child: Padding(
@@ -520,45 +589,37 @@ class GsnPalette extends StatelessWidget {
   }
 }
 
-// パレット内の各ノードアイテム
 class _PaletteItem extends StatelessWidget {
   final GsnNodeType type;
   const _PaletteItem({required this.type});
 
   @override
   Widget build(BuildContext context) {
-    // パレットに表示するためのダミーノードを作成
     final nodeForPalette = GsnNode(
       id: -1,
       type: type,
       position: Offset.zero,
-      width: 80, // パレット内のサイズは固定
+      width: 80,
       height: 48,
       label: GsnNode._gsnTypeName(type),
     );
 
-    // パレットに表示するウィジェット
     final child = _buildGsnShapeWidget(nodeForPalette, isPalette: true);
 
-    // Draggableウィジェットでラップして、ドラッグ可能にする
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Draggable<GsnNodeType>(
-        // ドラッグするデータ（ノード種別）
         data: type,
-        // ドラッグ中にカーソル下に表示されるウィジェット
         feedback: Material(
           elevation: 4.0,
           color: Colors.transparent,
           child: child,
         ),
-        // パレットに残る元のウィジェット
         child: child,
       ),
     );
   }
 }
-
 
 class _ResizeHandle extends StatelessWidget {
   final void Function(double dx, double dy) onDrag;
@@ -607,23 +668,97 @@ class GsnEdgePainter extends CustomPainter {
         final fromNode = nodes.firstWhere((n) => n.id == e.fromId);
         final toNode = nodes.firstWhere((n) => n.id == e.toId);
 
-        final a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
-        final b = toNode.position + Offset(toNode.width / 2, 0);
+        // 1. デフォルトの接続点を定義 (ノードの上下中央)
+        var a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
+        var b = toNode.position + Offset(toNode.width / 2, 0);
+
+        // 2. もし【開始ノード】がLambdaなら、接続点を三角形の先端に上書き
+        if (fromNode.type == GsnNodeType.application) {
+          a = fromNode.position +
+              Offset(fromNode.width * 0.75, fromNode.height * 0.5);
+        }
+
+        // 3. もし【終了ノード】がLambdaなら、接続点を三角形の先端に上書き
+        if (toNode.type == GsnNodeType.application) {
+          b = toNode.position + Offset(toNode.width * 0.25, toNode.height * 0.5);
+        }
+
+        // 2. もし【開始ノード】がLambdaなら、接続点を三角形の先端に上書き
+        if (fromNode.type == GsnNodeType.lambda) {
+          a = fromNode.position +
+              Offset(-fromNode.width * 0.1, fromNode.height * 0.5);
+        }
+
+        // 3. もし【終了ノード】がLambdaなら、接続点を三角形の先端に上書き
+        if (toNode.type == GsnNodeType.lambda) {
+          b = toNode.position + Offset(-toNode.width * 0.1, toNode.height * 0.5);
+        }
+
+        // --- ▼▼▼ ここからHubノードの処理を追記 ▼▼▼ ---
+
+        // 3. もし【開始ノード】がHubなら、相手に最も近い接続点を選ぶ
+        if (fromNode.type == GsnNodeType.hub) {
+          final hubTop = fromNode.position + Offset(fromNode.width * 0.5, 0);
+          final hubBottom =
+              fromNode.position + Offset(fromNode.width * 0.5, fromNode.height);
+          final hubRight =
+              fromNode.position + Offset(fromNode.width, fromNode.height * 0.5);
+
+          final distTop = (b - hubTop).distanceSquared;
+          final distBottom = (b - hubBottom).distanceSquared;
+          final distRight = (b - hubRight).distanceSquared;
+
+          if (distTop < distBottom && distTop < distRight) {
+            a = hubTop;
+          } else if (distBottom < distRight) {
+            a = hubBottom;
+          } else {
+            a = hubRight;
+          }
+        }
+
+        // 4. もし【終了ノード】がHubなら、相手に最も近い接続点を選ぶ
+        if (toNode.type == GsnNodeType.hub) {
+          final hubTop = toNode.position + Offset(toNode.width * 0.5, 0);
+          final hubBottom =
+              toNode.position + Offset(toNode.width * 0.5, toNode.height);
+          final hubRight =
+              toNode.position + Offset(toNode.width, toNode.height * 0.5);
+
+          final distTop = (a - hubTop).distanceSquared;
+          final distBottom = (a - hubBottom).distanceSquared;
+          final distRight = (a - hubRight).distanceSquared;
+
+          if (distTop < distBottom && distTop < distRight) {
+            b = hubTop;
+          } else if (distBottom < distRight) {
+            b = hubBottom;
+          } else {
+            b = hubRight;
+          }
+        }
 
         canvas.drawLine(a, b, paint);
+// ルールに基づいて矢印を描くかどうかを判断
+        // 「接続先ノードがContextでもGoalでもない」場合にtrueになる
+        final bool shouldDrawArrow =
+          toNode.type != GsnNodeType.hub && toNode.type != GsnNodeType.recordAccess && toNode.type != GsnNodeType.recordLabel && toNode.type != GsnNodeType.map;
 
-        const s = 10.0;
-        final dir = (b - a).normalize();
-        if (dir.distance == 0) continue;
-        final perp = Offset(-dir.dy, dir.dx);
-        final p1 = b - dir * s + perp * (s / 2);
-        final p2 = b - dir * s - perp * (s / 2);
-        final path = Path()
-          ..moveTo(b.dx, b.dy)
-          ..lineTo(p1.dx, p1.dy)
-          ..lineTo(p2.dx, p2.dy)
-          ..close();
-        canvas.drawPath(path, arrowPaint);
+        // shouldDrawArrowがtrueの場合のみ、矢印を描画する
+        if (shouldDrawArrow) {
+          const s = 10.0;
+          final dir = (b - a).normalize();
+          if (dir.distance == 0) continue;
+          final perp = Offset(-dir.dy, dir.dx);
+          final p1 = b - dir * s + perp * (s / 2);
+          final p2 = b - dir * s - perp * (s / 2);
+          final path = Path()
+            ..moveTo(b.dx, b.dy)
+            ..lineTo(p1.dx, p1.dy)
+            ..lineTo(p2.dx, p2.dy)
+            ..close();
+          canvas.drawPath(path, arrowPaint);
+        }
       } catch (err) {
         // Node not found, skip drawing this edge
       }
@@ -678,27 +813,290 @@ class RoundedRectPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-class DiamondPainter extends CustomPainter {
-  final Color color;
-  DiamondPainter(this.color);
-
+class EvidencePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = color;
-    final borderPaint = Paint()..color = Colors.black..strokeWidth = 1..style = PaintingStyle.stroke;
+    // 白い塗りつぶしのPaintオブジェクト
+    final fillPaint = Paint()..color = Colors.white;
+    // 黒い枠線のPaintオブジェクト
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke; // スタイルをstroke（線のみ）に設定
+
+    // 描画する矩形
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // まず白い円（楕円）を塗りつぶして描画
+    canvas.drawOval(rect, fillPaint);
+    // 次にその上に黒い枠線を描画
+    canvas.drawOval(rect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class UndevelopedPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    // 菱形を描画するためのパスを作成
     final path = Path()
+      // 1. 上辺の中央からスタート
       ..moveTo(size.width / 2, 0)
+      // 2. 右辺の中央へ線を引く
       ..lineTo(size.width, size.height / 2)
+      // 3. 下辺の中央へ線を引く
       ..lineTo(size.width / 2, size.height)
+      // 4. 左辺の中央へ線を引く
       ..lineTo(0, size.height / 2)
+      // 5. パスを閉じて始点へ戻る
       ..close();
-    canvas.drawPath(path, paint);
+
+    // 作成したパスを描画
     canvas.drawPath(path, borderPaint);
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
+
+class RecordPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 1. 白い塗りつぶしの設定
+    final fillPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    // 2. 黒い枠線の設定
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    // 3. 描画領域いっぱいの四角形を定義
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // 4. 白い円（楕円）を塗りつぶして描画
+    canvas.drawOval(rect, fillPaint);
+    // 5. その上に黒い枠線を描画
+    canvas.drawOval(rect, borderPaint);
+  }
+   @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+class SetPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 黒い塗りつぶしのPaintオブジェクトを作成
+    final borderPaint = Paint()
+      ..color = Colors.black // 色を黒に設定
+      ..style = PaintingStyle.fill; // スタイルをfill（塗りつぶし）に設定
+
+    canvas.drawOval(Rect.fromLTWH(0, 0, size.width, size.height), borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class LambdaPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = Colors.white;
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    canvas.drawOval(rect, paint);
+    canvas.drawOval(rect, borderPaint);
+
+
+    final trianglePath = Path()
+    // 1. 右辺の少し外側からスタート
+      ..moveTo(-size.width * 0.1, size.height * 0.25)
+    // 2. 右に突き出る頂点へ線を引く
+       ..lineTo( - 1, size.height * 0.5)
+    // 3. 右辺の少し外側に戻る
+       ..lineTo(-size.width  * 0.1, size.height * 0.75)
+      ..close();
+    canvas.drawPath(trianglePath, paint);
+    canvas.drawPath(trianglePath, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class ApplicationPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    final path = Path()
+      ..moveTo(size.width * 0.25, size.height * 0.5)
+      ..lineTo(size.width * 0.75, 0)
+      ..lineTo(size.width * 0.75, size.height)
+      ..close();
+    canvas.drawPath(path, borderPaint);
+  }
+   @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class HubPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2;
+
+    canvas.drawLine(Offset(size.width * 0.5, 0), Offset(size.width*0.5, size.height), paint);
+    canvas.drawLine(Offset(size.width * 0.5, size.height*0.5), Offset(size.width, size.height*0.5), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class MapPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = Colors.black;
+    final linePaint = Paint()..color = Colors.black..strokeWidth = 2;
+
+    final rectSize = size.width * 0.4;
+    final rect = Rect.fromCenter(
+      center: Offset(size.width * 0.5, size.height * 0.5),
+      width: rectSize,
+      height: rectSize,
+    );
+    canvas.drawRect(rect, paint);
+
+    canvas.drawLine(Offset(size.width * 0.5, 0), Offset(size.width*0.5, rect.top), linePaint);
+    canvas.drawLine(Offset(size.width * 0.5, rect.bottom), Offset(size.width*0.5, size.height), linePaint);
+    canvas.drawLine(Offset(rect.right, size.height * 0.5), Offset(size.width, size.height * 0.5), linePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+
+class RecordLabelPainter extends CustomPainter {
+  final String label;
+
+  RecordLabelPainter({required this.label});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 1. 左側に縦線を描画する
+    final linePaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2;
+    final lineX = size.width / 2; // 線のX座標
+    canvas.drawLine(Offset(lineX, 0), Offset(lineX, size.height), linePaint);
+
+    // 2. 表示する文字のスタイルを準備する
+    final textSpan = TextSpan(
+      text: label,
+      style: const TextStyle(
+        color: Colors.black,
+        fontSize: 12,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+
+    // 3. 文字を描画するためのTextPainterを準備する
+    final textPainter = TextPainter(
+      text: textSpan,
+      textDirection: TextDirection.ltr,
+      maxLines: 5, // 複数行を許容
+      ellipsis: '...', // はみ出した場合は...で省略
+    );
+
+    // 4. 文字をレイアウトする (どこにどのサイズで描画するか計算)
+    final textStartX = lineX + 10.0; // 線の右側10pxの位置から文字を開始
+    final availableWidth = size.width - textStartX; // 文字が使える横幅
+    textPainter.layout(
+        minWidth: 0, maxWidth: availableWidth > 0 ? availableWidth : 0);
+
+    // 5. 計算された位置に文字を実際に描画する
+    // Y座標を計算して、上下中央に配置する
+    final offsetY = (size.height - textPainter.height) / 2;
+    textPainter.paint(canvas, Offset(textStartX, offsetY));
+  }
+
+  @override
+  bool shouldRepaint(covariant RecordLabelPainter oldDelegate) {
+    // ラベルが変更された場合のみ再描画する
+    return oldDelegate.label != label;
+  }
+}
+
+
+class RecordAccessPainter extends CustomPainter {
+  final String label;
+
+  RecordAccessPainter({required this.label});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 1. 右端に縦線を描画する
+    final linePaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2;
+    // ノードの右端から5px内側に線を引く
+    final lineX = size.width / 2;
+    canvas.drawLine(Offset(lineX, 0), Offset(lineX, size.height), linePaint);
+
+    // 2. 表示する文字を準備する (TextPainter)
+    final textSpan = TextSpan(
+      text: label,
+      style: const TextStyle(
+        color: Colors.black,
+        fontSize: 12,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+    final textPainter = TextPainter(
+      text: textSpan,
+      textDirection: TextDirection.ltr,
+      maxLines: 5,
+      ellipsis: '...', // はみ出した場合は...で省略
+    );
+
+    // 3. 文字が使用できる横幅を計算してレイアウトする
+    const textPaddingRight = 8.0; // 文字と線の間の余白
+    final availableWidth = lineX - textPaddingRight;
+    textPainter.layout(
+        minWidth: 0, maxWidth: availableWidth > 0 ? availableWidth : 0);
+
+    // 4. 計算された位置に文字を描画する
+    // Y座標を計算して、上下中央に配置
+    final textOffsetY = (size.height - textPainter.height) / 2;
+    // X座標は0から開始（左端から描画）
+    textPainter.paint(canvas, Offset(0, textOffsetY));
+  }
+
+  @override
+  bool shouldRepaint(covariant RecordAccessPainter oldDelegate) {
+    // ラベルが変更された場合のみ再描画
+    return oldDelegate.label != label;
+  }
+}
+
 
 extension on Offset {
   Offset normalize() {
