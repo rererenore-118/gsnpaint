@@ -1102,5 +1102,6 @@ extension on Offset {
   Offset normalize() {
     final d = distance;
     return d == 0 ? this : this / d;
+
   }
 }
