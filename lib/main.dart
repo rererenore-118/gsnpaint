@@ -1,6 +1,8 @@
+
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MaterialApp(home: GsnEditor()));
@@ -250,6 +252,76 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
+  /// サーバーと通信してGSNの評価を実行する非同期関数
+  Future<void> _evaluateOnServer() async {
+    // Chromeで実行する場合、PCのIPアドレスではなく 'localhost' を使用
+    const String pcIpAddress = 'localhost';
+    final url = Uri.parse('http://$pcIpAddress:5000/evaluate');
+
+    // 処理中を示すローディングインジケータを表示
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      // 現在のエディタの状態をJSONデータに変換
+      final data = {
+        'nodes': _nodes.map((n) => n.toJson()).toList(),
+        'edges': _edges.map((e) => e.toJson()).toList()
+      };
+      final jsonString = jsonEncode(data);
+
+      // サーバーにHTTP POSTリクエストを送信 (タイムアウトを15秒に設定)
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json; charset=UTF-8'},
+        body: jsonString,
+      ).timeout(const Duration(seconds: 15));
+
+      Navigator.pop(context); // ローディングインジケータを閉じる
+
+      // サーバーからの応答を処理
+      if (response.statusCode == 200) {
+        // 成功: 結果を整形してダイアログに表示
+        final decodedJson = jsonDecode(utf8.decode(response.bodyBytes)); // 日本語文字化け対応
+        final prettyJson = const JsonEncoder.withIndent('  ').convert(decodedJson);
+        _showResultDialog('評価結果', prettyJson);
+      } else {
+        // サーバー側エラー: エラーメッセージを表示
+        final errorJson = jsonDecode(utf8.decode(response.bodyBytes));
+        _showResultDialog('サーバーエラー', 'Status: ${response.statusCode}\nMessage: ${errorJson['error']}');
+      }
+    } catch (e) {
+      // 通信エラー: エラーメッセージを表示
+      Navigator.pop(context); // ローディングインジケータを閉じる
+      _showResultDialog('通信エラー', 'サーバーに接続できませんでした。\n$e');
+    }
+  }
+
+  /// 結果表示用の汎用ダイアログ
+  void _showResultDialog(String title, String content) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Scrollbar(
+          child: SingleChildScrollView(
+            child: Text(content),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
+    );
+  }
+
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -266,6 +338,10 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: _exportJson,
               icon: const Icon(Icons.save_alt),
               tooltip: 'JSON保存'),
+           IconButton(
+              onPressed: _evaluateOnServer,
+              icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
+              tooltip: 'サーバーで評価'),
         ],
       ),
       body: Stack(
@@ -413,9 +489,7 @@ class _GsnEditorState extends State<GsnEditor> {
     return (p - proj).distance;
   }
 
-  // =======================================================================
-  // ★★★ エラーを修正しました ★★★
-  // =======================================================================
+
   void _editLabel(GsnNode node) {
     final ctl = TextEditingController(text: node.label);
 
@@ -463,9 +537,7 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 }
 
-// =======================================================================
-// ★★★ 論文の定義に合わせて修正しました ★★★
-// =======================================================================
+
 Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
   final labelStyle = TextStyle(
     fontSize: isPalette ? 10 : 12,
@@ -555,7 +627,8 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
         size: Size(node.width, node.height),
         painter: RecordLabelPainter(label: node.label),
       );
-    case GsnNodeType.recordAccess: // ▼▼▼ ここを以下のように書き換えます ▼▼▼
+    case GsnNodeType.recordAccess:
+
       // CustomPaintを直接使い、painterにnode.labelを渡す
       return CustomPaint(
         size: Size(node.width, node.height),
@@ -668,35 +741,35 @@ class GsnEdgePainter extends CustomPainter {
         final fromNode = nodes.firstWhere((n) => n.id == e.fromId);
         final toNode = nodes.firstWhere((n) => n.id == e.toId);
 
-        // 1. デフォルトの接続点を定義 (ノードの上下中央)
+        // デフォルトの接続点を定義 (ノードの上下中央)
         var a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
         var b = toNode.position + Offset(toNode.width / 2, 0);
 
-        // 2. もし【開始ノード】がLambdaなら、接続点を三角形の先端に上書き
+        // もし開始ノードがLambdaなら、接続点を三角形の先端に上書き
         if (fromNode.type == GsnNodeType.application) {
           a = fromNode.position +
               Offset(fromNode.width * 0.75, fromNode.height * 0.5);
         }
 
-        // 3. もし【終了ノード】がLambdaなら、接続点を三角形の先端に上書き
+        //  もし終了ノードがLambdaなら、接続点を三角形の先端に上書き
         if (toNode.type == GsnNodeType.application) {
           b = toNode.position + Offset(toNode.width * 0.25, toNode.height * 0.5);
         }
 
-        // 2. もし【開始ノード】がLambdaなら、接続点を三角形の先端に上書き
+        //  もし開始ノードがLambdaなら、接続点を三角形の先端に上書き
         if (fromNode.type == GsnNodeType.lambda) {
           a = fromNode.position +
               Offset(-fromNode.width * 0.1, fromNode.height * 0.5);
         }
 
-        // 3. もし【終了ノード】がLambdaなら、接続点を三角形の先端に上書き
+        //  もし終了ノードがLambdaなら、接続点を三角形の先端に上書き
         if (toNode.type == GsnNodeType.lambda) {
           b = toNode.position + Offset(-toNode.width * 0.1, toNode.height * 0.5);
         }
 
-        // --- ▼▼▼ ここからHubノードの処理を追記 ▼▼▼ ---
 
-        // 3. もし【開始ノード】がHubなら、相手に最も近い接続点を選ぶ
+
+        //  もし開始ノードがHubなら、相手に最も近い接続点を選ぶ
         if (fromNode.type == GsnNodeType.hub) {
           final hubTop = fromNode.position + Offset(fromNode.width * 0.5, 0);
           final hubBottom =
@@ -717,7 +790,7 @@ class GsnEdgePainter extends CustomPainter {
           }
         }
 
-        // 4. もし【終了ノード】がHubなら、相手に最も近い接続点を選ぶ
+        // もし終了ノードがHubなら、相手に最も近い接続点を選ぶ
         if (toNode.type == GsnNodeType.hub) {
           final hubTop = toNode.position + Offset(toNode.width * 0.5, 0);
           final hubBottom =
@@ -847,15 +920,15 @@ class UndevelopedPainter extends CustomPainter {
 
     // 菱形を描画するためのパスを作成
     final path = Path()
-      // 1. 上辺の中央からスタート
+      // 上辺の中央からスタート
       ..moveTo(size.width / 2, 0)
-      // 2. 右辺の中央へ線を引く
+      // 右辺の中央へ線を引く
       ..lineTo(size.width, size.height / 2)
-      // 3. 下辺の中央へ線を引く
+      //  下辺の中央へ線を引く
       ..lineTo(size.width / 2, size.height)
-      // 4. 左辺の中央へ線を引く
+      // 左辺の中央へ線を引く
       ..lineTo(0, size.height / 2)
-      // 5. パスを閉じて始点へ戻る
+      // パスを閉じて始点へ戻る
       ..close();
 
     // 作成したパスを描画
@@ -869,23 +942,23 @@ class UndevelopedPainter extends CustomPainter {
 class RecordPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. 白い塗りつぶしの設定
+    //  白い塗りつぶしの設定
     final fillPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.fill;
 
-    // 2. 黒い枠線の設定
+    // 黒い枠線の設定
     final borderPaint = Paint()
       ..color = Colors.black
       ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
 
-    // 3. 描画領域いっぱいの四角形を定義
+    //描画領域いっぱいの四角形を定義
     final rect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    // 4. 白い円（楕円）を塗りつぶして描画
+    //白い円（楕円）を塗りつぶして描画
     canvas.drawOval(rect, fillPaint);
-    // 5. その上に黒い枠線を描画
+    //その上に黒い枠線を描画
     canvas.drawOval(rect, borderPaint);
   }
    @override
@@ -921,11 +994,11 @@ class LambdaPainter extends CustomPainter {
 
 
     final trianglePath = Path()
-    // 1. 右辺の少し外側からスタート
+    // 右辺の少し外側からスタート
       ..moveTo(-size.width * 0.1, size.height * 0.25)
-    // 2. 右に突き出る頂点へ線を引く
+    // 右に突き出る頂点へ線を引く
        ..lineTo( - 1, size.height * 0.5)
-    // 3. 右辺の少し外側に戻る
+    //右辺の少し外側に戻る
        ..lineTo(-size.width  * 0.1, size.height * 0.75)
       ..close();
     canvas.drawPath(trianglePath, paint);
@@ -1001,14 +1074,14 @@ class RecordLabelPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. 左側に縦線を描画する
+    //左側に縦線を描画する
     final linePaint = Paint()
       ..color = Colors.black
       ..strokeWidth = 2;
     final lineX = size.width / 2; // 線のX座標
     canvas.drawLine(Offset(lineX, 0), Offset(lineX, size.height), linePaint);
 
-    // 2. 表示する文字のスタイルを準備する
+    //表示する文字のスタイルを準備する
     final textSpan = TextSpan(
       text: label,
       style: const TextStyle(
@@ -1018,7 +1091,7 @@ class RecordLabelPainter extends CustomPainter {
       ),
     );
 
-    // 3. 文字を描画するためのTextPainterを準備する
+    //文字を描画するためのTextPainterを準備する
     final textPainter = TextPainter(
       text: textSpan,
       textDirection: TextDirection.ltr,
@@ -1026,13 +1099,13 @@ class RecordLabelPainter extends CustomPainter {
       ellipsis: '...', // はみ出した場合は...で省略
     );
 
-    // 4. 文字をレイアウトする (どこにどのサイズで描画するか計算)
+    //文字をレイアウトする (どこにどのサイズで描画するか計算)
     final textStartX = lineX + 10.0; // 線の右側10pxの位置から文字を開始
     final availableWidth = size.width - textStartX; // 文字が使える横幅
     textPainter.layout(
         minWidth: 0, maxWidth: availableWidth > 0 ? availableWidth : 0);
 
-    // 5. 計算された位置に文字を実際に描画する
+    // 計算された位置に文字を実際に描画する
     // Y座標を計算して、上下中央に配置する
     final offsetY = (size.height - textPainter.height) / 2;
     textPainter.paint(canvas, Offset(textStartX, offsetY));
@@ -1053,7 +1126,7 @@ class RecordAccessPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. 右端に縦線を描画する
+    // 右端に縦線を描画する
     final linePaint = Paint()
       ..color = Colors.black
       ..strokeWidth = 2;
@@ -1061,7 +1134,7 @@ class RecordAccessPainter extends CustomPainter {
     final lineX = size.width / 2;
     canvas.drawLine(Offset(lineX, 0), Offset(lineX, size.height), linePaint);
 
-    // 2. 表示する文字を準備する (TextPainter)
+    //表示する文字を準備する (TextPainter)
     final textSpan = TextSpan(
       text: label,
       style: const TextStyle(
@@ -1074,16 +1147,16 @@ class RecordAccessPainter extends CustomPainter {
       text: textSpan,
       textDirection: TextDirection.ltr,
       maxLines: 5,
-      ellipsis: '...', // はみ出した場合は...で省略
+      ellipsis: '...', // はみ出した場合は...
     );
 
-    // 3. 文字が使用できる横幅を計算してレイアウトする
+    //文字が使用できる横幅を計算してレイアウトする
     const textPaddingRight = 8.0; // 文字と線の間の余白
     final availableWidth = lineX - textPaddingRight;
     textPainter.layout(
         minWidth: 0, maxWidth: availableWidth > 0 ? availableWidth : 0);
 
-    // 4. 計算された位置に文字を描画する
+    // 計算された位置に文字を描画する
     // Y座標を計算して、上下中央に配置
     final textOffsetY = (size.height - textPainter.height) / 2;
     // X座標は0から開始（左端から描画）
