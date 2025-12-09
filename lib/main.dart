@@ -1,4 +1,4 @@
-
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:html' as html;
@@ -21,7 +21,8 @@ enum GsnNodeType {
   map,
   stringLiteral,
   recordLabel,
-  record
+  record,
+  x
 }
 
 class GsnNode {
@@ -95,6 +96,8 @@ class GsnNode {
         return 'StringLiteral';
       case GsnNodeType.recordLabel:
         return 'RecordLabel';
+      case GsnNodeType.x:
+        return 'X';
     }
   }
 }
@@ -148,6 +151,40 @@ class _GsnEditorState extends State<GsnEditor> {
     };
     final jsonString = jsonEncode(data);
     await prefs.setString('gsn_editor_data', jsonString);
+  }
+
+  //図を一括で削除
+  Future<void> _confirmClearDiagram() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('図の全削除'),
+        content: const Text('現在表示されているすべてのノードとエッジを削除し、エディタをリセットします。よろしいですか？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('キャンセル')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('すべて削除'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true) {
+      setState(() {
+        _nodes.clear();
+        _edges.clear();
+        _nodeCounter = 0;
+        _connecting = null;
+        _deleteMode = false;
+      });
+      _saveToLocalStorage();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('図がリセットされました。')),
+      );
+    }
   }
 
   Future<void> _loadFromLocalStorage() async {
@@ -300,6 +337,73 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
+  /// サーバからGSN図の構造（ノードとエッジ）を読み込む
+  Future<void> _loadDiagramFromServer() async {
+    // 1. ローディングダイアログを表示
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return const Center(child: CircularProgressIndicator());
+      },
+    );
+
+    // 2. サーバの新しいエンドポイントを指定
+    final url = Uri.parse('http://127.0.0.1:5000/get-diagram');
+
+    try {
+      final response = await http.get(url).timeout(const Duration(seconds: 10));
+
+      Navigator.pop(context); // ローディングダイアログを閉じる
+
+      if (response.statusCode == 200) {
+        // 3. サーバから受け取ったJSONデータをデコード
+        final Map<String, dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
+
+        // 4. JSONから新しいノードとエッジのリストを作成
+        final newNodes = (data['nodes'] as List)
+            .map((nodeData) => GsnNode.fromJson(nodeData))
+            .toList();
+
+        final newEdges = (data['edges'] as List)
+            .map((edgeData) => GsnEdge.fromJson(edgeData))
+            .toList();
+
+        // 5. ★★★ finalエラー修正箇所 ★★★
+        // setStateの中で、リストの「中身」だけを入れ替える
+        setState(() {
+          // 古いデータをすべて削除
+          _nodes.clear();
+          _edges.clear();
+
+          // 新しいデータを追加
+          _nodes.addAll(newNodes);
+          _edges.addAll(newEdges);
+
+          // 次に作成するノードIDを更新
+          if (_nodes.isNotEmpty) {
+            // max() を使うために 'dart:math' が必要
+            _nodeCounter = _nodes.map((n) => n.id).reduce(max) + 1;
+          } else {
+            _nodeCounter = 1;
+          }
+        });
+        // ★★★ ここまでがパースと描画の核心部です ★★★
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('サーバから図を読み込みました。')),
+        );
+      } else {
+        // サーバが 404 や 500 エラーを返した場合
+        _showResultDialog('読込エラー',
+            'サーバから図を読み込めませんでした。\nStatus: ${response.statusCode}');
+      }
+    } catch (e) {
+      // 通信タイムアウトや接続失敗
+      Navigator.pop(context); // ローディングを閉じる
+      _showResultDialog('通信エラー', 'サーバに接続できませんでした。\n$e');
+    }
+  }
   /// 結果表示用の汎用ダイアログ
   void _showResultDialog(String title, String content) {
     showDialog(
@@ -342,6 +446,16 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: _evaluateOnServer,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
               tooltip: 'サーバーで評価'),
+          IconButton(
+            icon: const Icon(Icons.cloud_download),
+            tooltip: 'サーバから読み込み',
+            onPressed: _loadDiagramFromServer, // <-- 作成した関数を呼び出す
+          ),
+          IconButton(
+            icon: const Icon(Icons.clear_all),
+            tooltip: '図をすべて削除（リセット）',
+            onPressed: _confirmClearDiagram, // <-- 新しいメソッドを呼び出す
+          ),
         ],
       ),
       body: Stack(
@@ -590,11 +704,13 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
     case GsnNodeType.application:
     // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
       if (isPalette) {
+        // ここを新しいクラス名に置き換える
         return buildPainter(ApplicationPainter()); // buildPainterはPainterとlabelを両方描画する
       } else {
         // CustomPaintを直接使ってPainterのみ描画する
         return CustomPaint(
           size: Size(node.width, node.height),
+          // ここを新しいクラス名に置き換える
           painter: ApplicationPainter(),
         );
       }
@@ -638,6 +754,8 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
     case GsnNodeType.context:
       return buildPainter(RoundedRectPainter(Colors.purple.shade100, 12));
 
+    case GsnNodeType.x:
+      return buildPainter(XPainter());
   }
 }
 
@@ -646,16 +764,26 @@ class GsnPalette extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 画面の高さを取得
+    final screenHeight = MediaQuery.of(context).size.height;
+
     return Card(
       elevation: 4,
-      child: Padding(
+      child: Container(
+        // パレットの高さを画面の80%に制限（これを超えるとスクロールする）
+        constraints: BoxConstraints(
+          maxHeight: screenHeight * 0.8,
+        ),
         padding: const EdgeInsets.all(8.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: GsnNodeType.values
-              .map((type) => _PaletteItem(type: type))
-              .toList(),
+        // ここでスクロール可能にする
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: GsnNodeType.values
+                .map((type) => _PaletteItem(type: type))
+                .toList(),
+          ),
         ),
       ),
     );
@@ -723,123 +851,268 @@ class _ResizeHandle extends StatelessWidget {
   }
 }
 
+// main.dart ファイル内の既存の GsnEdgePainter クラスを
+// 以下のコードで「置き換え」てください。
+
 class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
   final int? connectingId;
-  GsnEdgePainter(this.nodes, this.edges, {this.connectingId});
+  final bool isRemovalMode;
 
+  GsnEdgePainter(
+    this.nodes,
+    this.edges, {
+    this.connectingId,
+    this.isRemovalMode = false,
+  });
+
+  // ノードの矩形上で、指定された点(point)に最も近い辺上の点を計算する
+  Offset _getNearestPointOnRect(Rect rect, Offset point) {
+    // ノードの中心
+    final center = rect.center;
+    // 中心から指定点へのベクトル
+    final dir = point - center;
+
+    // ノードの辺（上下左右）の座標
+    final left = rect.left;
+    final right = rect.right;
+    final top = rect.top;
+    final bottom = rect.bottom;
+
+    // ベクトルがどの辺と交差するかを計算
+    // (t = 0.5 のとき辺にぶつかる)
+    final dx = dir.dx.abs() * rect.height;
+    final dy = dir.dy.abs() * rect.width;
+
+    if (dx > dy) {
+      // 左右の辺に接続する場合
+      final t = (rect.width / 2) / dir.dx.abs();
+      // Y座標は中心から dir.dy の傾きで計算
+      final yOffset = center.dy + dir.dy * t;
+
+      return dir.dx > 0
+          ? Offset(right, yOffset) // 右辺に接続
+          : Offset(left, yOffset);  // 左辺に接続
+    } else {
+      // 上下の辺に接続する場合 (X座標をノードの中心に固定)
+      return dir.dy > 0
+          ? Offset(center.dx, bottom)
+          : Offset(center.dx, top);
+    }
+  }
+
+  // ----------------------------------------------------
+  // Helper: 特殊ノードの接続候補点リストを取得
+  // ----------------------------------------------------
+  List<Offset> _getSpecialPoints(GsnNode node, Rect rect) {
+    if (node.type == GsnNodeType.lambda) {
+      // Lambdaノードの接続点 (左側のT-コネクタの上下端)
+      const double wRatioTee = 0.25;
+      final double wTee = node.width * wRatioTee;
+      final double tBarX = rect.left + wTee / 2;
+
+      final specialTop = Offset(tBarX, rect.top);
+      final specialBottom = Offset(tBarX, rect.bottom);
+      return [specialTop, specialBottom];
+    } else if (node.type == GsnNodeType.application) {
+      // Applicationノードの接続点 (縦線の上、下、右端)
+      const double hubRatio = 0.4;
+      const double hubCenterRatio = hubRatio * 0.5;
+      final double lineX = rect.left + node.width * hubCenterRatio;
+
+      final specialTop = Offset(lineX, rect.top);
+      final specialBottom = Offset(lineX, rect.bottom);
+      final specialRight = Offset(rect.right, rect.center.dy);
+      return [specialTop, specialBottom, specialRight];
+    } else if (node.type == GsnNodeType.map) {
+      // Mapノードの接続点 (シンボルの中央線上の黒い四角形の上端、下端、右端)
+      final rectSize = node.width * 0.4;
+      final halfRectSize = rectSize / 2;
+
+      final lineX = rect.center.dx;
+      final rectTopY = rect.center.dy - halfRectSize;
+      final rectBottomY = rect.center.dy + halfRectSize;
+
+      final specialTop = Offset(lineX, rectTopY);
+      final specialBottom = Offset(lineX, rectBottomY);
+      final specialRight = Offset(rect.right, rect.center.dy);
+      return [specialTop, specialBottom, specialRight];
+    }
+    return [];
+  }
+
+  // ----------------------------------------------------
+  // paint メソッド本体
+  // ----------------------------------------------------
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.black
-      ..strokeWidth = 2;
-    final arrowPaint = Paint()..color = Colors.black;
+    for (final edge in edges) {
+      final GsnNode fromNode;
+      final GsnNode toNode;
 
-    for (var e in edges) {
       try {
-        final fromNode = nodes.firstWhere((n) => n.id == e.fromId);
-        final toNode = nodes.firstWhere((n) => n.id == e.toId);
-
-        // デフォルトの接続点を定義 (ノードの上下中央)
-        var a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
-        var b = toNode.position + Offset(toNode.width / 2, 0);
-
-        // もし開始ノードがLambdaなら、接続点を三角形の先端に上書き
-        if (fromNode.type == GsnNodeType.application) {
-          a = fromNode.position +
-              Offset(fromNode.width * 0.75, fromNode.height * 0.5);
-        }
-
-        //  もし終了ノードがLambdaなら、接続点を三角形の先端に上書き
-        if (toNode.type == GsnNodeType.application) {
-          b = toNode.position + Offset(toNode.width * 0.25, toNode.height * 0.5);
-        }
-
-        //  もし開始ノードがLambdaなら、接続点を三角形の先端に上書き
-        if (fromNode.type == GsnNodeType.lambda) {
-          a = fromNode.position +
-              Offset(-fromNode.width * 0.1, fromNode.height * 0.5);
-        }
-
-        //  もし終了ノードがLambdaなら、接続点を三角形の先端に上書き
-        if (toNode.type == GsnNodeType.lambda) {
-          b = toNode.position + Offset(-toNode.width * 0.1, toNode.height * 0.5);
-        }
-
-
-
-        //  もし開始ノードがHubなら、相手に最も近い接続点を選ぶ
-        if (fromNode.type == GsnNodeType.hub) {
-          final hubTop = fromNode.position + Offset(fromNode.width * 0.5, 0);
-          final hubBottom =
-              fromNode.position + Offset(fromNode.width * 0.5, fromNode.height);
-          final hubRight =
-              fromNode.position + Offset(fromNode.width, fromNode.height * 0.5);
-
-          final distTop = (b - hubTop).distanceSquared;
-          final distBottom = (b - hubBottom).distanceSquared;
-          final distRight = (b - hubRight).distanceSquared;
-
-          if (distTop < distBottom && distTop < distRight) {
-            a = hubTop;
-          } else if (distBottom < distRight) {
-            a = hubBottom;
-          } else {
-            a = hubRight;
-          }
-        }
-
-        // もし終了ノードがHubなら、相手に最も近い接続点を選ぶ
-        if (toNode.type == GsnNodeType.hub) {
-          final hubTop = toNode.position + Offset(toNode.width * 0.5, 0);
-          final hubBottom =
-              toNode.position + Offset(toNode.width * 0.5, toNode.height);
-          final hubRight =
-              toNode.position + Offset(toNode.width, toNode.height * 0.5);
-
-          final distTop = (a - hubTop).distanceSquared;
-          final distBottom = (a - hubBottom).distanceSquared;
-          final distRight = (a - hubRight).distanceSquared;
-
-          if (distTop < distBottom && distTop < distRight) {
-            b = hubTop;
-          } else if (distBottom < distRight) {
-            b = hubBottom;
-          } else {
-            b = hubRight;
-          }
-        }
-
-        canvas.drawLine(a, b, paint);
-// ルールに基づいて矢印を描くかどうかを判断
-        // 「接続先ノードがContextでもGoalでもない」場合にtrueになる
-        final bool shouldDrawArrow =
-          toNode.type != GsnNodeType.hub && toNode.type != GsnNodeType.recordAccess && toNode.type != GsnNodeType.recordLabel && toNode.type != GsnNodeType.map;
-
-        // shouldDrawArrowがtrueの場合のみ、矢印を描画する
-        if (shouldDrawArrow) {
-          const s = 10.0;
-          final dir = (b - a).normalize();
-          if (dir.distance == 0) continue;
-          final perp = Offset(-dir.dy, dir.dx);
-          final p1 = b - dir * s + perp * (s / 2);
-          final p2 = b - dir * s - perp * (s / 2);
-          final path = Path()
-            ..moveTo(b.dx, b.dy)
-            ..lineTo(p1.dx, p1.dy)
-            ..lineTo(p2.dx, p2.dy)
-            ..close();
-          canvas.drawPath(path, arrowPaint);
-        }
-      } catch (err) {
-        // Node not found, skip drawing this edge
+        fromNode = nodes.firstWhere((n) => n.id == edge.fromId);
+        toNode = nodes.firstWhere((n) => n.id == edge.toId);
+      } catch (e) {
+        continue;
       }
+
+      final isSelected = (connectingId == fromNode.id || connectingId == toNode.id);
+
+      final paint = Paint()
+        ..color = isRemovalMode
+            ? Colors.red.withOpacity(0.5)
+            : (isSelected ? Colors.blue.shade800 : Colors.black)
+        ..strokeWidth = isSelected ? 3 : 2;
+
+Offset startPoint, endPoint;
+
+      // 特殊ノード判定
+      final bool fromIsLambda = fromNode.type == GsnNodeType.lambda;
+      final bool toIsLambda = toNode.type == GsnNodeType.lambda;
+      final bool fromIsApplication = fromNode.type == GsnNodeType.application;
+      final bool toIsApplication = toNode.type == GsnNodeType.application;
+      final bool fromIsMap = fromNode.type == GsnNodeType.map;
+      final bool toIsMap = toNode.type == GsnNodeType.map;
+      final bool fromIsSpecial = fromIsLambda || fromIsApplication || fromIsMap;
+      final bool toIsSpecial = toIsLambda || toIsApplication || toIsMap;
+
+      // ----------------------------------------------------
+      // Case 1 & 2: 両方のノードが特殊ノードの場合 (同じ種類同士も含む)
+      // ----------------------------------------------------
+      if (fromIsSpecial && toIsSpecial) {
+          // 修正: fromIsSpecial && toIsSpecial の条件で統一的な処理を行う
+          final fromRect = Rect.fromLTWH(fromNode.position.dx, fromNode.position.dy, fromNode.width, fromNode.height);
+          final toRect = Rect.fromLTWH(toNode.position.dx, toNode.position.dy, toNode.width, toNode.height);
+
+          final fromPoints = _getSpecialPoints(fromNode, fromRect);
+          final toPoints = _getSpecialPoints(toNode, toRect);
+
+          double minDistanceSquared = double.infinity;
+          Offset closestStartPoint = Offset.zero;
+          Offset closestEndPoint = Offset.zero;
+
+          // 総当たりで最短距離のペアを探す
+          for (final p1 in fromPoints) {
+              for (final p2 in toPoints) {
+                  final distSquared = (p1 - p2).distanceSquared;
+                  if (distSquared < minDistanceSquared) {
+                      minDistanceSquared = distSquared;
+                      closestStartPoint = p1;
+                      closestEndPoint = p2;
+                  }
+              }
+          }
+
+          startPoint = closestStartPoint;
+          endPoint = closestEndPoint;
+
+      } else if (fromIsSpecial || toIsSpecial) {
+
+          // ----------------------------------------------------
+          // Case 3: 片方のみが特殊ノードの場合 (既存の優先度ロジックを保持)
+          // ----------------------------------------------------
+
+          GsnNode specialNode;
+          GsnNode otherNode;
+          // GsnNodeType specialType; // 使用しないため削除
+
+          // 優先度: Lambda > Application > Map
+          if (fromIsLambda || toIsLambda) {
+              specialNode = fromIsLambda ? fromNode : toNode;
+              otherNode = fromIsLambda ? toNode : fromNode;
+          } else if (fromIsApplication || toIsApplication) {
+              specialNode = fromIsApplication ? fromNode : toNode;
+              otherNode = fromIsApplication ? toNode : fromNode;
+          } else {
+              specialNode = fromIsMap ? fromNode : toNode;
+              otherNode = fromIsMap ? toNode : fromNode;
+          }
+
+          final specialNodeRect = Rect.fromLTWH(specialNode.position.dx, specialNode.position.dy, specialNode.width, specialNode.height);
+          final otherNodeRect = Rect.fromLTWH(otherNode.position.dx, otherNode.position.dy, otherNode.width, otherNode.height);
+          final otherCenter = otherNodeRect.center;
+
+          // specialNodeのタイプに基づいて接続候補点を計算
+          List<Offset> points = _getSpecialPoints(specialNode, specialNodeRect);
+
+          // 相手ノードの中心に最も近い接続ポイントを選択
+          final closestSpecialPoint = points.reduce((a, b) =>
+              (a - otherCenter).distanceSquared < (b - otherCenter).distanceSquared
+                  ? a
+                  : b);
+
+          // 接続点の決定
+          if (specialNode == fromNode) {
+              startPoint = closestSpecialPoint;
+              endPoint = _getNearestPointOnRect(otherNodeRect, closestSpecialPoint);
+          } else {
+              startPoint = _getNearestPointOnRect(otherNodeRect, closestSpecialPoint);
+              endPoint = closestSpecialPoint;
+          }
+      } else {
+          // ----------------------------------------------------
+          // Case 4: 通常ノード同士の接続
+          // ----------------------------------------------------
+          final fromRect = Rect.fromLTWH(
+            fromNode.position.dx,
+            fromNode.position.dy,
+            fromNode.width,
+            fromNode.height,
+          );
+          final toRect = Rect.fromLTWH(
+            toNode.position.dx,
+            toNode.position.dy,
+            toNode.width,
+            toNode.height,
+          );
+
+          startPoint = _getNearestPointOnRect(fromRect, toRect.center);
+          endPoint = _getNearestPointOnRect(toRect, fromRect.center);
+      }
+
+      // 線を描画
+      canvas.drawLine(startPoint, endPoint, paint);
+
+      // 矢印の描画 (変更なし)
+      final Offset direction = (endPoint - startPoint);
+      final double distance = direction.distance;
+      final Offset normalizedDirection =
+          distance == 0 ? Offset.zero : direction / distance;
+
+      final Offset arrowPoint =
+          endPoint - normalizedDirection * (isSelected ? 3 : 2);
+      const double arrowSize = 6.0;
+      final Path arrowPath = Path()
+        ..moveTo(arrowPoint.dx, arrowPoint.dy)
+        ..lineTo(
+          arrowPoint.dx -
+              normalizedDirection.dx * arrowSize -
+              normalizedDirection.dy * arrowSize / 2,
+          arrowPoint.dy -
+              normalizedDirection.dy * arrowSize +
+              normalizedDirection.dx * arrowSize / 2,
+        )
+        ..lineTo(
+          arrowPoint.dx -
+              normalizedDirection.dx * arrowSize +
+              normalizedDirection.dy * arrowSize / 2,
+          arrowPoint.dy -
+              normalizedDirection.dy * arrowSize -
+              normalizedDirection.dx * arrowSize / 2,
+        )
+        ..close();
+      canvas.drawPath(arrowPath, paint..style = PaintingStyle.fill);
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant GsnEdgePainter oldDelegate) =>
+      oldDelegate.nodes != nodes ||
+      oldDelegate.edges != edges ||
+      oldDelegate.connectingId != connectingId ||
+      oldDelegate.isRemovalMode != isRemovalMode;
 }
 
 class ParallelogramPainter extends CustomPainter {
@@ -980,51 +1253,130 @@ class SetPainter extends CustomPainter {
 }
 
 class LambdaPainter extends CustomPainter {
+  // 色は白に固定し、枠線は黒に固定
+  LambdaPainter();
+
   @override
   void paint(Canvas canvas, Size size) {
+    // 塗りつぶしは白、枠線は黒
     final paint = Paint()..color = Colors.white;
     final borderPaint = Paint()
       ..color = Colors.black
       ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
+    final linePaint = Paint() // コネクタ用の太い線
+      ..color = Colors.black
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
 
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
-    canvas.drawOval(rect, paint);
-    canvas.drawOval(rect, borderPaint);
+    // --- 1. 定数定義と座標計算 ---
+    const double wRatioTee = 0.25;
+    const double wRatioTriangle = 0.10;
+    const double triangleHeightRatio = 0.5; // 三角形の高さをノード全体の高さの50%に制限
+    // 垂直線の長さを元の20.0pxに戻す
+    final double tBarLength = size.height * 0.5;
+
+    final double wTee = size.width * wRatioTee;
+    final double wTriangle = size.width * wRatioTriangle;
+    final double wOval = size.width - wTee - wTriangle;
+
+    // 形状の開始・終了X座標
+    final double xTeeEnd = wTee; // Tと三角形の境界
+    final double xTriangleEnd = wTee + wTriangle; // 三角形と楕円の境界
+    final double centerY = size.height / 2;
+
+    // 三角形の高さ関連
+    final double triangleBaseYTop = centerY - (size.height * triangleHeightRatio) / 2;
+    final double triangleBaseYBottom = centerY + (size.height * triangleHeightRatio) / 2;
+
+    // Tの垂直線はTコネクタ領域の中央に配置
+    final double tBarX = wTee / 2;
 
 
+    // --- 2. T-Connectorの描画 ---
+
+    // (A) クロスバーを描画 (垂直線) - 長さはtBarLengthのまま
+    canvas.drawLine(
+      Offset(tBarX, centerY - tBarLength),
+      Offset(tBarX, centerY + tBarLength),
+      linePaint,
+    );
+
+    // (B) ステム (水平線) を描画: 垂直線から三角形の基部(xTeeEnd)まで接続
+    // **ノード左端への突き出し (Offset(0, centerY)からOffset(tBarX, centerY)の描画)** を削除
+    canvas.drawLine(
+      Offset(tBarX, centerY), // Tの垂直線から
+      Offset(xTeeEnd, centerY), // 三角形の基部まで
+      linePaint,
+    );
+
+
+    // --- 3. Triangleの描画 (中央部) ---
     final trianglePath = Path()
-    // 右辺の少し外側からスタート
-      ..moveTo(-size.width * 0.1, size.height * 0.25)
-    // 右に突き出る頂点へ線を引く
-       ..lineTo( - 1, size.height * 0.5)
-    //右辺の少し外側に戻る
-       ..lineTo(-size.width  * 0.1, size.height * 0.75)
+      ..moveTo(xTeeEnd, triangleBaseYTop)
+      ..lineTo(xTriangleEnd, centerY)
+      ..lineTo(xTeeEnd, triangleBaseYBottom)
       ..close();
+
     canvas.drawPath(trianglePath, paint);
     canvas.drawPath(trianglePath, borderPaint);
+
+    // --- 4. Ovalの描画 (右側) ---
+    final ovalRect = Rect.fromLTWH(xTriangleEnd, 0, wOval, size.height);
+    canvas.drawOval(ovalRect, paint);
+    canvas.drawOval(ovalRect, borderPaint);
   }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+
 class ApplicationPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final borderPaint = Paint()
       ..color = Colors.black
-      ..strokeWidth = 1
+      ..strokeWidth = 2.0 // 線を太くする
       ..style = PaintingStyle.stroke;
 
-    final path = Path()
-      ..moveTo(size.width * 0.25, size.height * 0.5)
-      ..lineTo(size.width * 0.75, 0)
-      ..lineTo(size.width * 0.75, size.height)
+    final fillPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    // --- 1. 定数定義 ---
+    // ノードの約 40% を Hub コネクタ部分に割り当てる
+    final double hubWidth = size.width * 0.4;
+    final double centerH = size.height * 0.5;
+
+    // --- 2. Hubのコネクタ部分 (線のみ描画) ---
+    final double hubCenter = hubWidth * 0.5;
+
+    // 縦線
+    canvas.drawLine(Offset(hubCenter, 0), Offset(hubCenter, size.height), borderPaint);
+
+    // 横線（中央の縦線から右側の三角形の境界まで）
+    canvas.drawLine(Offset(hubCenter, centerH), Offset(hubWidth, centerH), borderPaint);
+
+    // --- 3. Applicationの三角形部分 (右側 60%) ---
+    final double triangleStart = hubWidth;
+
+    final Path trianglePath = Path()
+      ..moveTo(triangleStart, centerH)               // Hubコネクタの終点から開始
+      ..lineTo(size.width, 0)                        // 右上の頂点
+      ..lineTo(size.width, size.height)              // 右下の頂点
       ..close();
-    canvas.drawPath(path, borderPaint);
+
+    // 三角形の塗りつぶしと枠線
+    canvas.drawPath(trianglePath, fillPaint);
+    canvas.drawPath(trianglePath, borderPaint);
+
+    // 境界線が三角形に上書きされる可能性があるので、Hub線を再度描画
+    canvas.drawLine(Offset(hubCenter, 0), Offset(hubCenter, size.height), borderPaint);
+    canvas.drawLine(Offset(hubCenter, centerH), Offset(hubWidth, centerH), borderPaint);
   }
-   @override
+
+  @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
@@ -1170,7 +1522,29 @@ class RecordAccessPainter extends CustomPainter {
   }
 }
 
+class XPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 白い塗りつぶしのPaintオブジェクト
+    final fillPaint = Paint()..color = Colors.white;
+    // 黒い枠線のPaintオブジェクト
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke; // スタイルをstroke（線のみ）に設定
 
+    // 描画する矩形
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // まず白い円（楕円）を塗りつぶして描画
+    canvas.drawOval(rect, fillPaint);
+    // 次にその上に黒い枠線を描画
+    canvas.drawOval(rect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
 extension on Offset {
   Offset normalize() {
     final d = distance;
