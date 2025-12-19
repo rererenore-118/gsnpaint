@@ -338,7 +338,7 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 
   /// サーバからGSN図の構造（ノードとエッジ）を読み込む
-  Future<void> _loadDiagramFromServer() async {
+  /*Future<void> _loadDiagramFromServer() async {
     // 1. ローディングダイアログを表示
     showDialog(
       context: context,
@@ -403,7 +403,68 @@ class _GsnEditorState extends State<GsnEditor> {
       Navigator.pop(context); // ローディングを閉じる
       _showResultDialog('通信エラー', 'サーバに接続できませんでした。\n$e');
     }
+  }*/
+  // ----------------------------------------------------
+// 【追加対象】_GsnEditorState クラスに追加する _importJson メソッド
+// ----------------------------------------------------
+
+  // 新しいメソッド: ローカルのJSONファイルから図を読み込む
+  void _importJson() {
+    // 1. HTMLのファイル入力要素を作成
+    final input = html.FileUploadInputElement()..accept = '.json';
+    input.click(); // ファイル選択ダイアログを開く
+
+    input.onChange.listen((e) {
+      final files = input.files;
+      if (files!.isEmpty) return;
+
+      final file = files[0];
+      final reader = html.FileReader();
+
+      // 2. ファイルをテキストとして読み込む
+      reader.onLoadEnd.listen((e) {
+        try {
+          final jsonString = reader.result as String;
+          final data = jsonDecode(jsonString);
+
+          // 3. データのパースと状態の更新
+          final newNodes = (data['nodes'] as List)
+              .map((nodeData) => GsnNode.fromJson(nodeData))
+              .toList();
+
+          final newEdges = (data['edges'] as List)
+              .map((edgeData) => GsnEdge.fromJson(edgeData))
+              .toList();
+
+          setState(() {
+            _nodes.clear();
+            _edges.clear();
+            _nodes.addAll(newNodes);
+            _edges.addAll(newEdges);
+
+            // ノードカウンターの更新
+            if (_nodes.isNotEmpty) {
+              // max() を使うために 'dart:math' が必要
+              _nodeCounter = _nodes.map((n) => n.id).reduce(max) + 1;
+            } else {
+              _nodeCounter = 1;
+            }
+          });
+
+          _saveToLocalStorage();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ローカルファイルから図を読み込みました。')),
+          );
+
+        } catch (e) {
+          _showResultDialog('読込エラー', 'ファイルの解析に失敗しました。\n$e');
+        }
+      });
+
+      reader.readAsText(file, 'utf-8');
+    });
   }
+
   /// 結果表示用の汎用ダイアログ
   void _showResultDialog(String title, String content) {
     showDialog(
@@ -446,10 +507,16 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: _evaluateOnServer,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
               tooltip: 'サーバーで評価'),
-          IconButton(
+          /*IconButton(
             icon: const Icon(Icons.cloud_download),
             tooltip: 'サーバから読み込み',
             onPressed: _loadDiagramFromServer, // <-- 作成した関数を呼び出す
+          ),*/
+          // ローカルファイルから読み込むボタン
+          IconButton(
+            onPressed: _importJson,
+            icon: const Icon(Icons.folder_open),
+            tooltip: 'ローカルJSON読み込み',
           ),
           IconButton(
             icon: const Icon(Icons.clear_all),
