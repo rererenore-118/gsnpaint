@@ -42,6 +42,8 @@ class GsnNode {
     String? label,
   }) : label = label ?? _gsnTypeName(type);
 
+
+
   factory GsnNode.fromJson(Map<String, dynamic> json) {
     return GsnNode(
       id: json['id'],
@@ -140,6 +142,116 @@ class _GsnEditorState extends State<GsnEditor> {
   void initState() {
     super.initState();
     _loadFromLocalStorage();
+  }
+
+  static String _gsnTypeName(GsnNodeType t) {
+    switch (t) {
+      case GsnNodeType.goal:
+        return 'Goal';
+      case GsnNodeType.strategy:
+        return 'Strategy';
+      case GsnNodeType.context:
+        return 'Context';
+      case GsnNodeType.evidence:
+        return 'Evidence';
+      case GsnNodeType.undeveloped:
+        return 'Undeveloped';
+      case GsnNodeType.set:
+        return 'Set';
+      case GsnNodeType.record:
+        return 'Record';
+      case GsnNodeType.recordAccess:
+        return 'RecordAccess';
+      case GsnNodeType.lambda:
+        return 'Lambda';
+      case GsnNodeType.application:
+        return 'Application';
+      case GsnNodeType.hub:
+        return 'Hub';
+      case GsnNodeType.map:
+        return 'Map';
+      case GsnNodeType.stringLiteral:
+        return 'StringLiteral';
+      case GsnNodeType.recordLabel:
+        return 'RecordLabel';
+      case GsnNodeType.x:
+        return 'X';
+    }
+  }
+
+  Future<void> _evaluateGsn() async {
+
+    // 送信データ作成
+    final requestData = {
+      "nodes": _nodes.map((n) => {
+        "id": n.id,
+        "gsn_type":_gsnTypeName(n.type),
+        "description": n.label,
+        "position_x": n.position.dx,
+        "position_y": n.position.dy,
+        "width": n.width,
+        "height": n.height,
+      }).toList(),
+      "edges":_edges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
+    };
+
+    try {
+      // サーバーへ送信
+      final response = await http.post(
+        Uri.parse('http://127.0.0.1:5000/evaluate'),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode(requestData),
+      );
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> result = jsonDecode(utf8.decode(response.bodyBytes));
+
+        // ★ここが変更点: メイン変数は更新せず、一時的なリストを作成
+        final List<dynamic> nodeData = result['nodes'] ?? [];
+        final List<GsnNode> resultNodes = nodeData
+            .map((data) => GsnNode.fromJson(data))
+            .toList();
+
+        final List<dynamic> edgeData = result['edges'] ?? [];
+        final List<GsnEdge> resultEdges = edgeData
+          .map((data) => GsnEdge.fromJson(data))
+          .toList();
+        // ★ビューアをダイアログとして開く
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => GsnResultViewer(
+              nodes: resultNodes,
+              edges: resultEdges
+            ),
+          );
+        }
+
+      } else {
+        _showErrorDialog("評価エラー: ${response.statusCode}\n${response.body}");
+      }
+    } catch (e) {
+      _showErrorDialog("通信エラー: $e");
+    }
+
+  }
+// エラーを表示するための共通関数
+  void _showErrorDialog(String message) {
+    if (!mounted) return; // 画面が存在しない場合は何もしない
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("エラー"),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text("OK"),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _saveToLocalStorage() async {
@@ -504,7 +616,7 @@ class _GsnEditorState extends State<GsnEditor> {
               icon: const Icon(Icons.save_alt),
               tooltip: 'JSON保存'),
            IconButton(
-              onPressed: _evaluateOnServer,
+              onPressed: _evaluateGsn,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
               tooltip: 'サーバーで評価'),
           /*IconButton(
@@ -1618,4 +1730,142 @@ extension on Offset {
     return d == 0 ? this : this / d;
 
   }
+}
+
+// --- 評価結果を表示するための専用ビューア ---
+class GsnResultViewer extends StatelessWidget {
+  final List<GsnNode> nodes;
+  final List<GsnEdge> edges;
+
+  const GsnResultViewer({super.key, required this.nodes, required this.edges});
+
+  @override
+  Widget build(BuildContext context) {
+    // キャンバスのサイズを計算（ノードがはみ出さないように）
+    double maxX = 0;
+    double maxY = 0;
+    for (var n in nodes) {
+      if (n.position.dx > maxX) maxX = n.position.dx;
+      if (n.position.dy > maxY) maxY = n.position.dy;
+    }
+    // 余白を含めたサイズ
+    final canvasWidth = max(800.0, maxX + 200);
+    final canvasHeight = max(600.0, maxY + 200);
+
+    return Dialog(
+      insetPadding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          // ヘッダー
+          AppBar(
+            title: const Text("評価結果ビューア"),
+            automaticallyImplyLeading: false,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+          // ボディ（ズーム可能なキャンバス）
+          Expanded(
+            child: InteractiveViewer(
+              boundaryMargin: const EdgeInsets.all(double.infinity),
+              minScale: 0.1,
+              maxScale: 5.0,
+              constrained: false, // 無限キャンバスのように振る舞う
+              child: SizedBox(
+                width: canvasWidth,
+                height: canvasHeight,
+                child: Stack(
+                  children: [
+                    // 1. エッジの描画
+                    CustomPaint(
+                      size: Size(canvasWidth, canvasHeight),
+                      painter: _SimpleEdgePainter(nodes, edges),
+                    ),
+                    // 2. ノードの描画
+                    ...nodes.map((node) {
+                      return Positioned(
+                        left: node.position.dx,
+                        top: node.position.dy,
+                        child: Container(
+                          width: node.width,
+                          height: node.height,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: _getNodeColor(node.type), // 色分け
+                            border: Border.all(color: Colors.black),
+                            // ゴールなどは四角、ストラテジーは平行四辺形などが望ましいが
+                            // ここでは簡易的に丸角や形状を変えるロジックを入れる
+                            borderRadius: node.type == GsnNodeType.goal
+                                ? BorderRadius.zero
+                                : BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            node.label,
+                            style: const TextStyle(fontSize: 12),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ノードの種類に応じた簡易的な色分け
+  Color _getNodeColor(GsnNodeType type) {
+    switch (type) {
+      case GsnNodeType.goal: return Colors.green[100]!;
+      case GsnNodeType.strategy: return Colors.grey[300]!;
+      case GsnNodeType.evidence: return Colors.blue[100]!;
+      case GsnNodeType.context: return Colors.yellow[100]!;
+      case GsnNodeType.undeveloped: return Colors.grey;
+      default: return Colors.white;
+    }
+  }
+}
+
+// ビューア専用のエッジ描画クラス
+class _SimpleEdgePainter extends CustomPainter {
+  final List<GsnNode> nodes;
+  final List<GsnEdge> edges;
+  _SimpleEdgePainter(this.nodes, this.edges);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    for (var edge in edges) {
+      // IDからノードオブジェクトを検索
+      try {
+        final fromNode = nodes.firstWhere((n) => n.id == edge.fromId);
+        final toNode = nodes.firstWhere((n) => n.id == edge.toId);
+
+        // ノードの中心同士を結ぶ
+        final start = Offset(
+            fromNode.position.dx + fromNode.width / 2,
+            fromNode.position.dy + fromNode.height / 2);
+        final end = Offset(
+            toNode.position.dx + toNode.width / 2,
+            toNode.position.dy + toNode.height / 2);
+
+        canvas.drawLine(start, end, paint);
+      } catch (e) {
+        // ノードが見つからない場合はスキップ
+      }
+    }
+  }
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
