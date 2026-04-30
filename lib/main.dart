@@ -5,7 +5,10 @@ import 'dart:html' as html;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() => runApp(const MaterialApp(home: GsnEditor()));
+void main() => runApp(const MaterialApp(
+  debugShowCheckedModeBanner: false,
+  home: GsnEditor(),
+));
 
 enum GsnNodeType {
   goal,
@@ -13,11 +16,10 @@ enum GsnNodeType {
   context,
   evidence,
   undeveloped,
-  set,
   recordAccess,
   lambda,
   application,
-  hub,
+ // hub,
   map,
   stringLiteral,
   recordLabel,
@@ -80,8 +82,6 @@ class GsnNode {
         return 'Evidence';
       case GsnNodeType.undeveloped:
         return 'Undeveloped';
-      case GsnNodeType.set:
-        return 'Set';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -90,12 +90,12 @@ class GsnNode {
         return 'Lambda';
       case GsnNodeType.application:
         return 'Application';
-      case GsnNodeType.hub:
-        return 'Hub';
+//      case GsnNodeType.hub:
+  //      return 'Hub';
       case GsnNodeType.map:
         return 'Map';
-      case GsnNodeType.stringLiteral:
-        return 'StringLiteral';
+       case GsnNodeType.stringLiteral:
+         return 'StringLiteral';
       case GsnNodeType.recordLabel:
         return 'RecordLabel';
       case GsnNodeType.x:
@@ -156,8 +156,6 @@ class _GsnEditorState extends State<GsnEditor> {
         return 'Evidence';
       case GsnNodeType.undeveloped:
         return 'Undeveloped';
-      case GsnNodeType.set:
-        return 'Set';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -166,8 +164,8 @@ class _GsnEditorState extends State<GsnEditor> {
         return 'Lambda';
       case GsnNodeType.application:
         return 'Application';
-      case GsnNodeType.hub:
-        return 'Hub';
+//      case GsnNodeType.hub:
+//        return 'Hub';
       case GsnNodeType.map:
         return 'Map';
       case GsnNodeType.stringLiteral:
@@ -326,6 +324,11 @@ class _GsnEditorState extends State<GsnEditor> {
         id: _nodeCounter++,
         type: type,
         position: position,
+        label: (type == GsnNodeType.record ||
+                              type == GsnNodeType.x ||
+                              type == GsnNodeType.undeveloped)
+                              ? null
+                              : "",
       ));
     });
     _saveToLocalStorage();
@@ -835,7 +838,7 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
   final labelStyle = TextStyle(
     fontSize: isPalette ? 10 : 12,
     fontWeight: FontWeight.bold,
-    color: node.type == GsnNodeType.set || node.type == GsnNodeType.map ? Colors.white : Colors.black,
+    color: node.type == GsnNodeType.map ? Colors.white : Colors.black,
   );
 
   final label = Center(
@@ -874,8 +877,6 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
       return buildPainter(EvidencePainter());
     case GsnNodeType.undeveloped:
       return buildPainter(UndevelopedPainter());
-    case GsnNodeType.set:
-      return buildPainter(SetPainter());
     case GsnNodeType.record:
       return buildPainter(RecordPainter());
     case GsnNodeType.lambda:
@@ -893,7 +894,7 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
           painter: ApplicationPainter(),
         );
       }
-    case GsnNodeType.hub:
+/*    case GsnNodeType.hub:
     // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
       if (isPalette) {
         return buildPainter(HubPainter()); // buildPainterはPainterとlabelを両方描画する
@@ -903,7 +904,7 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
           size: Size(node.width, node.height),
           painter: HubPainter(),
         );
-      }
+      }*/
     case GsnNodeType.map:
       if (isPalette) {
         return buildPainter(MapPainter());
@@ -915,7 +916,7 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
       }
 
     case GsnNodeType.stringLiteral:
-      return label;
+      return buildPainter(StringLiteralPainter());
     case GsnNodeType.recordLabel:
       // CustomPaintを直接使い、painterにnode.labelを渡す
       return CustomPaint(
@@ -975,7 +976,15 @@ class _PaletteItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final nodeForPalette = GsnNode(
+    final nodeForShape = GsnNode(
+      id: -1,
+      type: type,
+      position: Offset.zero,
+      width: 80,
+      height: 48,
+      label: "",
+    );
+    final nodeForFeedback = GsnNode(
       id: -1,
       type: type,
       position: Offset.zero,
@@ -984,18 +993,42 @@ class _PaletteItem extends StatelessWidget {
       label: GsnNode._gsnTypeName(type),
     );
 
-    final child = _buildGsnShapeWidget(nodeForPalette, isPalette: true);
+    // 図形ウィジェットの生成
+    final shapeWidget = _buildGsnShapeWidget(nodeForShape, isPalette: true);
+    final feedbackWidget = _buildGsnShapeWidget(nodeForFeedback, isPalette: true);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Draggable<GsnNodeType>(
         data: type,
+        // ドラッグ中の見た目（半透明の図形の中に文字）
         feedback: Material(
           elevation: 4.0,
           color: Colors.transparent,
-          child: child,
+          child: Opacity(
+            opacity: 0.7,
+            child: feedbackWidget,
+          ),
         ),
-        child: child,
+        // ▼▼▼ パレット上の見た目（図形の下に文字を表示） ▼▼▼
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 図形部分（文字なし）
+            shapeWidget,
+            const SizedBox(height: 4), // 図形と文字の間隔
+            // 文字部分
+            Text(
+              GsnNode._gsnTypeName(type),
+              style: const TextStyle(
+                fontSize: 11,
+                color: Colors.black87,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1157,6 +1190,18 @@ Offset startPoint, endPoint;
       final bool fromIsSpecial = fromIsLambda || fromIsApplication || fromIsMap;
       final bool toIsSpecial = toIsLambda || toIsApplication || toIsMap;
 
+      final bool fromIsRecordLabel = fromNode.type == GsnNodeType.recordLabel;
+      final bool toIsRecordLabel = fromNode.type == GsnNodeType.recordLabel;
+      final bool fromIsRecordAccess = fromNode.type == GsnNodeType.recordAccess;
+      final bool toIsRecordAccess = fromNode.type == GsnNodeType.recordAccess;
+
+      final bool fromIsLiteral = fromIsRecordLabel || fromIsRecordAccess;
+      final bool toIsLiteral = toIsRecordLabel || fromIsRecordAccess;
+
+
+
+
+
       // ----------------------------------------------------
       // Case 1 & 2: 両方のノードが特殊ノードの場合 (同じ種類同士も含む)
       // ----------------------------------------------------
@@ -1230,6 +1275,7 @@ Offset startPoint, endPoint;
               startPoint = _getNearestPointOnRect(otherNodeRect, closestSpecialPoint);
               endPoint = closestSpecialPoint;
           }
+
       } else {
           // ----------------------------------------------------
           // Case 4: 通常ノード同士の接続
@@ -1247,9 +1293,15 @@ Offset startPoint, endPoint;
             toNode.height,
           );
 
-          startPoint = _getNearestPointOnRect(fromRect, toRect.center);
-          endPoint = _getNearestPointOnRect(toRect, fromRect.center);
+
+
+          // スタート地点：fromNodeの真ん中下
+          startPoint = fromRect.bottomCenter;
+
+          // エンド地点：toNodeの真ん中上
+          endPoint = toRect.topCenter;
       }
+
 
       // 線を描画
       canvas.drawLine(startPoint, endPoint, paint);
@@ -1292,6 +1344,27 @@ Offset startPoint, endPoint;
       oldDelegate.edges != edges ||
       oldDelegate.connectingId != connectingId ||
       oldDelegate.isRemovalMode != isRemovalMode;
+}
+
+// 文字(String)ノード用のPainter
+class StringLiteralPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 背景を薄い黄色にしてデータっぽさを出す
+    final fillPaint = Paint()..color = Colors.yellow.shade100;
+    // 枠線はオレンジ色
+    final borderPaint = Paint()
+      ..color = Colors.orange
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    canvas.drawRect(rect, fillPaint);
+    canvas.drawRect(rect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class ParallelogramPainter extends CustomPainter {
@@ -1416,20 +1489,7 @@ class RecordPainter extends CustomPainter {
    @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-class SetPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    // 黒い塗りつぶしのPaintオブジェクトを作成
-    final borderPaint = Paint()
-      ..color = Colors.black // 色を黒に設定
-      ..style = PaintingStyle.fill; // スタイルをfill（塗りつぶし）に設定
 
-    canvas.drawOval(Rect.fromLTWH(0, 0, size.width, size.height), borderPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
 
 class LambdaPainter extends CustomPainter {
   // 色は白に固定し、枠線は黒に固定
@@ -1559,7 +1619,7 @@ class ApplicationPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-class HubPainter extends CustomPainter {
+/*class HubPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
@@ -1572,7 +1632,7 @@ class HubPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
+}*/
 
 class MapPainter extends CustomPainter {
   @override
@@ -1588,8 +1648,8 @@ class MapPainter extends CustomPainter {
     );
     canvas.drawRect(rect, paint);
 
-    canvas.drawLine(Offset(size.width * 0.5, 0), Offset(size.width*0.5, rect.top), linePaint);
-    canvas.drawLine(Offset(size.width * 0.5, rect.bottom), Offset(size.width*0.5, size.height), linePaint);
+  //  canvas.drawLine(Offset(size.width * 0.5, 0), Offset(size.width*0.5, rect.top), linePaint);
+  //  canvas.drawLine(Offset(size.width * 0.5, rect.bottom), Offset(size.width*0.5, size.height), linePaint);
     canvas.drawLine(Offset(rect.right, size.height * 0.5), Offset(size.width, size.height * 0.5), linePaint);
   }
 
@@ -1704,21 +1764,33 @@ class RecordAccessPainter extends CustomPainter {
 class XPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    // 白い塗りつぶしのPaintオブジェクト
-    final fillPaint = Paint()..color = Colors.white;
-    // 黒い枠線のPaintオブジェクト
+    // 1. 白い塗りつぶしの設定
+    final fillPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    // 2. 黒い枠線の設定
     final borderPaint = Paint()
       ..color = Colors.black
       ..strokeWidth = 1
-      ..style = PaintingStyle.stroke; // スタイルをstroke（線のみ）に設定
+      ..style = PaintingStyle.stroke;
 
-    // 描画する矩形
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    // 3. 六角形の形（パス）を作る
+    final path = Path();
+    // 左右の尖り具合（幅の15%くらいを尖らせる）
+    final double offset = size.width * 0.15;
 
-    // まず白い円（楕円）を塗りつぶして描画
-    canvas.drawOval(rect, fillPaint);
-    // 次にその上に黒い枠線を描画
-    canvas.drawOval(rect, borderPaint);
+    path.moveTo(offset, 0);                        // 左上
+    path.lineTo(size.width - offset, 0);           // 右上
+    path.lineTo(size.width, size.height / 2);      // 右端（尖っている部分）
+    path.lineTo(size.width - offset, size.height); // 右下
+    path.lineTo(offset, size.height);              // 左下
+    path.lineTo(0, size.height / 2);               // 左端（尖っている部分）
+    path.close();                                  // パスを閉じる
+
+    // 4. 描画実行
+    canvas.drawPath(path, fillPaint);   // 白で塗る
+    canvas.drawPath(path, borderPaint); // 黒で枠線を書く
   }
 
   @override
@@ -1733,6 +1805,12 @@ extension on Offset {
 }
 
 // --- 評価結果を表示するための専用ビューア ---
+// main.dart の GsnResultViewer クラスを以下のように修正
+
+// ----------------------------------------------------
+// main.dart の GsnResultViewer クラスを以下に置き換え
+// ----------------------------------------------------
+
 class GsnResultViewer extends StatelessWidget {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
@@ -1741,14 +1819,14 @@ class GsnResultViewer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // キャンバスのサイズを計算（ノードがはみ出さないように）
+    // キャンバスのサイズ計算
     double maxX = 0;
     double maxY = 0;
     for (var n in nodes) {
       if (n.position.dx > maxX) maxX = n.position.dx;
       if (n.position.dy > maxY) maxY = n.position.dy;
     }
-    // 余白を含めたサイズ
+    // ノードの幅なども考慮して少し余裕を持たせる
     final canvasWidth = max(800.0, maxX + 200);
     final canvasHeight = max(600.0, maxY + 200);
 
@@ -1756,7 +1834,6 @@ class GsnResultViewer extends StatelessWidget {
       insetPadding: const EdgeInsets.all(20),
       child: Column(
         children: [
-          // ヘッダー
           AppBar(
             title: const Text("評価結果ビューア"),
             automaticallyImplyLeading: false,
@@ -1767,47 +1844,31 @@ class GsnResultViewer extends StatelessWidget {
               ),
             ],
           ),
-          // ボディ（ズーム可能なキャンバス）
           Expanded(
             child: InteractiveViewer(
               boundaryMargin: const EdgeInsets.all(double.infinity),
               minScale: 0.1,
               maxScale: 5.0,
-              constrained: false, // 無限キャンバスのように振る舞う
+              constrained: false,
               child: SizedBox(
                 width: canvasWidth,
                 height: canvasHeight,
                 child: Stack(
                   children: [
-                    // 1. エッジの描画
+                    // エッジの描画
                     CustomPaint(
                       size: Size(canvasWidth, canvasHeight),
                       painter: _SimpleEdgePainter(nodes, edges),
                     ),
-                    // 2. ノードの描画
+                    // ノードの描画
                     ...nodes.map((node) {
                       return Positioned(
                         left: node.position.dx,
                         top: node.position.dy,
-                        child: Container(
-                          width: node.width,
-                          height: node.height,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _getNodeColor(node.type), // 色分け
-                            border: Border.all(color: Colors.black),
-                            // ゴールなどは四角、ストラテジーは平行四辺形などが望ましいが
-                            // ここでは簡易的に丸角や形状を変えるロジックを入れる
-                            borderRadius: node.type == GsnNodeType.goal
-                                ? BorderRadius.zero
-                                : BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            node.label,
-                            style: const TextStyle(fontSize: 12),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
+                        // ★修正点: エディタ本体と同じ描画関数を再利用する
+                        // これにより、Strategyは平行四辺形、Evidenceは楕円など、
+                        // エディタと全く同じ見た目で表示されます。
+                        child: _buildGsnShapeWidget(node),
                       );
                     }).toList(),
                   ],
@@ -1819,19 +1880,52 @@ class GsnResultViewer extends StatelessWidget {
       ),
     );
   }
+}
 
-  // ノードの種類に応じた簡易的な色分け
+
+
+  // ▼▼▼ 色の定義を編集画面（各Painter）に合わせる ▼▼▼
   Color _getNodeColor(GsnNodeType type) {
     switch (type) {
-      case GsnNodeType.goal: return Colors.green[100]!;
-      case GsnNodeType.strategy: return Colors.grey[300]!;
-      case GsnNodeType.evidence: return Colors.blue[100]!;
-      case GsnNodeType.context: return Colors.yellow[100]!;
-      case GsnNodeType.undeveloped: return Colors.grey;
-      default: return Colors.white;
+      case GsnNodeType.goal:
+        return Colors.lightBlue.shade100; // 編集画面のGoal色
+      case GsnNodeType.strategy:
+        return Colors.orangeAccent.shade100; // 編集画面のStrategy色
+      case GsnNodeType.context:
+        return Colors.purple.shade100; // 編集画面のContext色
+      case GsnNodeType.map:
+        return Colors.black; // 編集画面のMap色
+      case GsnNodeType.evidence:
+      case GsnNodeType.undeveloped:
+      case GsnNodeType.record:
+      case GsnNodeType.lambda:
+      case GsnNodeType.application:
+      default:
+        return Colors.white; // その他は基本白
     }
   }
-}
+
+  // ▼▼▼ ノードの形状定義（Evidenceを楕円にする） ▼▼▼
+  ShapeBorder _getNodeShape(GsnNodeType type) {
+    if (type == GsnNodeType.evidence) {
+      // Evidenceは楕円形
+      return const OvalBorder(side: BorderSide(color: Colors.black));
+    }
+    // その他は角丸四角形または四角形
+    // GoalとMapは角を丸めない、Context等は丸める
+    double radius = 8.0;
+    if (type == GsnNodeType.goal || type == GsnNodeType.map) {
+      radius = 0.0;
+    } else if (type == GsnNodeType.context) {
+      radius = 12.0;
+    }
+
+    return RoundedRectangleBorder(
+      side: const BorderSide(color: Colors.black),
+      borderRadius: BorderRadius.circular(radius),
+    );
+  }
+
 
 // ビューア専用のエッジ描画クラス
 class _SimpleEdgePainter extends CustomPainter {
