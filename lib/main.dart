@@ -1,15 +1,22 @@
+// GSNエディタのFlutterフロントエンド（Webアプリ）。
+// パレットからノードをドラッグして配置し、▶ボタンでFlaskサーバにPOSTしてPGSN評価結果をダイアログ表示する。
+// エディタ状態はブラウザのSharedPreferencesに自動保存される。
+
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:html' as html;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'google_drive_service.dart';
 
 void main() => runApp(const MaterialApp(
   debugShowCheckedModeBanner: false,
   home: GsnEditor(),
 ));
 
+// Flaskサーバ側の gsn_type 文字列と1対1対応する（_gsnTypeName() で変換）。
+// goal〜evidence がGSNの基本要素、lambda〜x がPGSN拡張のDSL要素。
 enum GsnNodeType {
   goal,
   strategy,
@@ -19,7 +26,6 @@ enum GsnNodeType {
   recordAccess,
   lambda,
   application,
- // hub,
   map,
   stringLiteral,
   recordLabel,
@@ -70,6 +76,7 @@ class GsnNode {
         'height': height,
       };
 
+  // Flaskサーバ（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
     switch (t) {
       case GsnNodeType.goal:
@@ -90,8 +97,6 @@ class GsnNode {
         return 'Lambda';
       case GsnNodeType.application:
         return 'Application';
-//      case GsnNodeType.hub:
-  //      return 'Hub';
       case GsnNodeType.map:
         return 'Map';
        case GsnNodeType.stringLiteral:
@@ -104,6 +109,7 @@ class GsnNode {
   }
 }
 
+// エッジの向きは from（親）→ to（子）。Flaskへ送る際も同じ向きで送信する。
 class GsnEdge {
   final int fromId;
   final int toId;
@@ -114,6 +120,37 @@ class GsnEdge {
   }
 
   Map<String, dynamic> toJson() => {'from': fromId, 'to': toId};
+}
+
+// Undo/Redo用スナップショット
+class _DiagramSnapshot {
+  final List<GsnNode> nodes;
+  final List<GsnEdge> edges;
+  final int nodeCounter;
+
+  _DiagramSnapshot({
+    required this.nodes,
+    required this.edges,
+    required this.nodeCounter,
+  });
+
+  factory _DiagramSnapshot.capture(
+      List<GsnNode> nodes, List<GsnEdge> edges, int nodeCounter) {
+    return _DiagramSnapshot(
+      nodes: nodes
+          .map((n) => GsnNode(
+                id: n.id,
+                type: n.type,
+                position: n.position,
+                width: n.width,
+                height: n.height,
+                label: n.label,
+              ))
+          .toList(),
+      edges: edges.map((e) => GsnEdge(e.fromId, e.toId)).toList(),
+      nodeCounter: nodeCounter,
+    );
+  }
 }
 
 class GsnEditor extends StatefulWidget {
@@ -129,9 +166,132 @@ class _GsnEditorState extends State<GsnEditor> {
 
   final List<GsnNode> _nodes = [];
   final List<GsnEdge> _edges = [];
-  int _nodeCounter = 0;
+  int _nodeCounter = 0; // 採番用カウンタ。削除しても減らさないため一意性が保たれる。
   bool _deleteMode = false;
+  // エッジ接続の途中状態: 1回目クリックで選択したノードID。nullなら未選択。
   int? _connecting;
+
+  // 操作履歴（元に戻す・やり直し）
+  final List<_DiagramSnapshot> _undoStack = [];
+  final List<_DiagramSnapshot> _redoStack = [];
+  static const int _maxHistorySize = 50;
+
+  // ドラッグ先のキャンバス領域を特定するためのキー
+  final GlobalKey _dragTargetKey = GlobalKey();
+
+  // グリッドスナップ機能
+  bool _gridSnapEnabled = false;
+  static const double _gridSize = 40.0;
+
+  // 複数選択モード
+  bool _selectionMode = false;
+  final Set<int> _selectedNodeIds = {};
+  Offset? _selectionRectStart;
+  Offset? _selectionRectEnd;
+
+  // クリップボード（コピー&ペースト用）
+  List<GsnNode> _clipboard = [];
+  List<GsnEdge> _clipboardEdges = [];
+
+  // Google Drive 連携
+  final GoogleDriveService _driveService = GoogleDriveService();
+  bool _isDriveSignedIn = false;
+
+  Offset _snapToGrid(Offset pos) {
+    if (!_gridSnapEnabled) return pos;
+    return Offset(
+      (pos.dx / _gridSize).round() * _gridSize,
+      (pos.dy / _gridSize).round() * _gridSize,
+    );
+  }
+
+  void _toggleSelectionMode() {
+    setState(() {
+      _selectionMode = !_selectionMode;
+      _selectedNodeIds.clear();
+      _selectionRectStart = null;
+      _selectionRectEnd = null;
+    });
+  }
+
+  void _clearSelection() {
+    setState(() {
+      _selectedNodeIds.clear();
+      _selectionRectStart = null;
+      _selectionRectEnd = null;
+    });
+  }
+
+  void _copySelected() {
+    if (_selectedNodeIds.isEmpty) return;
+    final selected = _nodes.where((n) => _selectedNodeIds.contains(n.id)).toList();
+    _clipboard = selected
+        .map((n) => GsnNode(
+              id: n.id,
+              type: n.type,
+              position: n.position,
+              width: n.width,
+              height: n.height,
+              label: n.label,
+            ))
+        .toList();
+    // 選択ノード間のエッジも保持
+    _clipboardEdges = _edges
+        .where((e) =>
+            _selectedNodeIds.contains(e.fromId) &&
+            _selectedNodeIds.contains(e.toId))
+        .map((e) => GsnEdge(e.fromId, e.toId))
+        .toList();
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${selected.length}個のノードをコピーしました')),
+    );
+  }
+
+  void _pasteClipboard() {
+    if (_clipboard.isEmpty) return;
+    _saveToHistory();
+    // 旧ID → 新IDの対応表
+    final idMap = <int, int>{};
+    final newNodes = <GsnNode>[];
+    for (final n in _clipboard) {
+      final newId = _nodeCounter++;
+      idMap[n.id] = newId;
+      newNodes.add(GsnNode(
+        id: newId,
+        type: n.type,
+        position: n.position + const Offset(40, 40),
+        width: n.width,
+        height: n.height,
+        label: n.label,
+      ));
+    }
+    final newEdges = _clipboardEdges
+        .map((e) => GsnEdge(idMap[e.fromId]!, idMap[e.toId]!))
+        .toList();
+    setState(() {
+      _nodes.addAll(newNodes);
+      _edges.addAll(newEdges);
+      // ペースト後は新ノードを選択状態にする
+      _selectedNodeIds
+        ..clear()
+        ..addAll(newNodes.map((n) => n.id));
+    });
+    _saveToLocalStorage();
+  }
+
+  void _deleteSelected() {
+    if (_selectedNodeIds.isEmpty) return;
+    _saveToHistory();
+    setState(() {
+      _nodes.removeWhere((n) => _selectedNodeIds.contains(n.id));
+      _edges.removeWhere((e) =>
+          _selectedNodeIds.contains(e.fromId) ||
+          _selectedNodeIds.contains(e.toId));
+      _selectedNodeIds.clear();
+    });
+    _saveToLocalStorage();
+  }
 
   static const double _minW = 60;
   static const double _minH = 40;
@@ -142,48 +302,27 @@ class _GsnEditorState extends State<GsnEditor> {
   void initState() {
     super.initState();
     _loadFromLocalStorage();
+    _initDrive();
   }
 
-  static String _gsnTypeName(GsnNodeType t) {
-    switch (t) {
-      case GsnNodeType.goal:
-        return 'Goal';
-      case GsnNodeType.strategy:
-        return 'Strategy';
-      case GsnNodeType.context:
-        return 'Context';
-      case GsnNodeType.evidence:
-        return 'Evidence';
-      case GsnNodeType.undeveloped:
-        return 'Undeveloped';
-      case GsnNodeType.record:
-        return 'Record';
-      case GsnNodeType.recordAccess:
-        return 'RecordAccess';
-      case GsnNodeType.lambda:
-        return 'Lambda';
-      case GsnNodeType.application:
-        return 'Application';
-//      case GsnNodeType.hub:
-//        return 'Hub';
-      case GsnNodeType.map:
-        return 'Map';
-      case GsnNodeType.stringLiteral:
-        return 'StringLiteral';
-      case GsnNodeType.recordLabel:
-        return 'RecordLabel';
-      case GsnNodeType.x:
-        return 'X';
-    }
+  /// アプリ起動時に前回のサインイン状態を静かに復元する
+  Future<void> _initDrive() async {
+    _driveService.onCurrentUserChanged.listen((account) {
+      if (mounted) setState(() => _isDriveSignedIn = account != null);
+    });
+    final account = await _driveService.signInSilently();
+    if (mounted) setState(() => _isDriveSignedIn = account != null);
   }
 
+  // エディタの状態は変更せず、評価結果を別ダイアログで表示する（非破壊的）。
+  // 編集中の図を上書きしないため、GsnResultViewer をダイアログとして開く設計。
   Future<void> _evaluateGsn() async {
 
     // 送信データ作成
     final requestData = {
       "nodes": _nodes.map((n) => {
         "id": n.id,
-        "gsn_type":_gsnTypeName(n.type),
+        "gsn_type": GsnNode._gsnTypeName(n.type),
         "description": n.label,
         "position_x": n.position.dx,
         "position_y": n.position.dy,
@@ -283,6 +422,7 @@ class _GsnEditorState extends State<GsnEditor> {
     );
 
     if (result == true) {
+      _saveToHistory();
       setState(() {
         _nodes.clear();
         _edges.clear();
@@ -318,12 +458,46 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
+  // 現在の状態をUndoスタックに保存（新しい操作前に呼ぶ）
+  void _saveToHistory() {
+    _undoStack.add(_DiagramSnapshot.capture(_nodes, _edges, _nodeCounter));
+    if (_undoStack.length > _maxHistorySize) _undoStack.removeAt(0);
+    _redoStack.clear();
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    _redoStack.add(_DiagramSnapshot.capture(_nodes, _edges, _nodeCounter));
+    final snap = _undoStack.removeLast();
+    _applySnapshot(snap);
+  }
+
+  void _redo() {
+    if (_redoStack.isEmpty) return;
+    _undoStack.add(_DiagramSnapshot.capture(_nodes, _edges, _nodeCounter));
+    final snap = _redoStack.removeLast();
+    _applySnapshot(snap);
+  }
+
+  void _applySnapshot(_DiagramSnapshot snap) {
+    setState(() {
+      _nodes.clear();
+      _nodes.addAll(snap.nodes);
+      _edges.clear();
+      _edges.addAll(snap.edges);
+      _nodeCounter = snap.nodeCounter;
+      _connecting = null;
+    });
+    _saveToLocalStorage();
+  }
+
   void _addNode(GsnNodeType type, Offset position) {
+    _saveToHistory();
     setState(() {
       _nodes.add(GsnNode(
         id: _nodeCounter++,
         type: type,
-        position: position,
+        position: _snapToGrid(position),
         label: (type == GsnNodeType.record ||
                               type == GsnNodeType.x ||
                               type == GsnNodeType.undeveloped)
@@ -338,6 +512,8 @@ class _GsnEditorState extends State<GsnEditor> {
     setState(() => _deleteMode = !_deleteMode);
   }
 
+  // 2タップでエッジ接続: 1回目でfrom（青くなる）を選択、2回目でtoを確定してエッジ追加。
+  // 同じノードを2回タップするとキャンセル。
   void _handleTapNode(GsnNode node) {
     if (_deleteMode) {
       _confirmDeleteNode(node);
@@ -345,6 +521,7 @@ class _GsnEditorState extends State<GsnEditor> {
       if (_connecting == null) {
         setState(() => _connecting = node.id);
       } else if (_connecting != node.id) {
+        _saveToHistory();
         setState(() {
           _edges.add(GsnEdge(_connecting!, node.id));
           _connecting = null;
@@ -367,6 +544,7 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: () => Navigator.pop(ctx), child: const Text('キャンセル')),
           TextButton(
             onPressed: () {
+              _saveToHistory();
               setState(() {
                 _nodes.remove(node);
                 _edges.removeWhere(
@@ -393,6 +571,7 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: () => Navigator.pop(ctx), child: const Text('キャンセル')),
           TextButton(
             onPressed: () {
+              _saveToHistory();
               setState(() => _edges.remove(edge));
               Navigator.pop(ctx);
               _saveToLocalStorage();
@@ -404,126 +583,6 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
-  /// サーバーと通信してGSNの評価を実行する非同期関数
-  Future<void> _evaluateOnServer() async {
-    // Chromeで実行する場合、PCのIPアドレスではなく 'localhost' を使用
-    const String pcIpAddress = 'localhost';
-    final url = Uri.parse('http://$pcIpAddress:5000/evaluate');
-
-    // 処理中を示すローディングインジケータを表示
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const Center(child: CircularProgressIndicator()),
-    );
-
-    try {
-      // 現在のエディタの状態をJSONデータに変換
-      final data = {
-        'nodes': _nodes.map((n) => n.toJson()).toList(),
-        'edges': _edges.map((e) => e.toJson()).toList()
-      };
-      final jsonString = jsonEncode(data);
-
-      // サーバーにHTTP POSTリクエストを送信 (タイムアウトを15秒に設定)
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json; charset=UTF-8'},
-        body: jsonString,
-      ).timeout(const Duration(seconds: 15));
-
-      Navigator.pop(context); // ローディングインジケータを閉じる
-
-      // サーバーからの応答を処理
-      if (response.statusCode == 200) {
-        // 成功: 結果を整形してダイアログに表示
-        final decodedJson = jsonDecode(utf8.decode(response.bodyBytes)); // 日本語文字化け対応
-        final prettyJson = const JsonEncoder.withIndent('  ').convert(decodedJson);
-        _showResultDialog('評価結果', prettyJson);
-      } else {
-        // サーバー側エラー: エラーメッセージを表示
-        final errorJson = jsonDecode(utf8.decode(response.bodyBytes));
-        _showResultDialog('サーバーエラー', 'Status: ${response.statusCode}\nMessage: ${errorJson['error']}');
-      }
-    } catch (e) {
-      // 通信エラー: エラーメッセージを表示
-      Navigator.pop(context); // ローディングインジケータを閉じる
-      _showResultDialog('通信エラー', 'サーバーに接続できませんでした。\n$e');
-    }
-  }
-
-  /// サーバからGSN図の構造（ノードとエッジ）を読み込む
-  /*Future<void> _loadDiagramFromServer() async {
-    // 1. ローディングダイアログを表示
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return const Center(child: CircularProgressIndicator());
-      },
-    );
-
-    // 2. サーバの新しいエンドポイントを指定
-    final url = Uri.parse('http://127.0.0.1:5000/get-diagram');
-
-    try {
-      final response = await http.get(url).timeout(const Duration(seconds: 10));
-
-      Navigator.pop(context); // ローディングダイアログを閉じる
-
-      if (response.statusCode == 200) {
-        // 3. サーバから受け取ったJSONデータをデコード
-        final Map<String, dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
-
-        // 4. JSONから新しいノードとエッジのリストを作成
-        final newNodes = (data['nodes'] as List)
-            .map((nodeData) => GsnNode.fromJson(nodeData))
-            .toList();
-
-        final newEdges = (data['edges'] as List)
-            .map((edgeData) => GsnEdge.fromJson(edgeData))
-            .toList();
-
-        // 5. ★★★ finalエラー修正箇所 ★★★
-        // setStateの中で、リストの「中身」だけを入れ替える
-        setState(() {
-          // 古いデータをすべて削除
-          _nodes.clear();
-          _edges.clear();
-
-          // 新しいデータを追加
-          _nodes.addAll(newNodes);
-          _edges.addAll(newEdges);
-
-          // 次に作成するノードIDを更新
-          if (_nodes.isNotEmpty) {
-            // max() を使うために 'dart:math' が必要
-            _nodeCounter = _nodes.map((n) => n.id).reduce(max) + 1;
-          } else {
-            _nodeCounter = 1;
-          }
-        });
-        // ★★★ ここまでがパースと描画の核心部です ★★★
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('サーバから図を読み込みました。')),
-        );
-      } else {
-        // サーバが 404 や 500 エラーを返した場合
-        _showResultDialog('読込エラー',
-            'サーバから図を読み込めませんでした。\nStatus: ${response.statusCode}');
-      }
-    } catch (e) {
-      // 通信タイムアウトや接続失敗
-      Navigator.pop(context); // ローディングを閉じる
-      _showResultDialog('通信エラー', 'サーバに接続できませんでした。\n$e');
-    }
-  }*/
-  // ----------------------------------------------------
-// 【追加対象】_GsnEditorState クラスに追加する _importJson メソッド
-// ----------------------------------------------------
-
-  // 新しいメソッド: ローカルのJSONファイルから図を読み込む
   void _importJson() {
     // 1. HTMLのファイル入力要素を作成
     final input = html.FileUploadInputElement()..accept = '.json';
@@ -543,6 +602,7 @@ class _GsnEditorState extends State<GsnEditor> {
           final data = jsonDecode(jsonString);
 
           // 3. データのパースと状態の更新
+          _saveToHistory();
           final newNodes = (data['nodes'] as List)
               .map((nodeData) => GsnNode.fromJson(nodeData))
               .toList();
@@ -609,6 +669,49 @@ class _GsnEditorState extends State<GsnEditor> {
         title: const Text('GSNエディタ'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.undo),
+            onPressed: _undoStack.isEmpty ? null : _undo,
+            tooltip: '元に戻す (Undo)',
+          ),
+          IconButton(
+            icon: const Icon(Icons.redo),
+            onPressed: _redoStack.isEmpty ? null : _redo,
+            tooltip: 'やり直す (Redo)',
+          ),
+          IconButton(
+            icon: Icon(
+              _gridSnapEnabled ? Icons.grid_on : Icons.grid_off,
+              color: _gridSnapEnabled ? Colors.blue : null,
+            ),
+            onPressed: () => setState(() => _gridSnapEnabled = !_gridSnapEnabled),
+            tooltip: 'グリッドスナップ切替',
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.select_all,
+              color: _selectionMode ? Colors.orange : null,
+            ),
+            onPressed: _toggleSelectionMode,
+            tooltip: '複数選択モード切替',
+          ),
+          if (_selectionMode) ...[
+            IconButton(
+              icon: const Icon(Icons.copy),
+              onPressed: _selectedNodeIds.isNotEmpty ? _copySelected : null,
+              tooltip: '選択ノードをコピー',
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_sweep),
+              onPressed: _selectedNodeIds.isNotEmpty ? _deleteSelected : null,
+              tooltip: '選択ノードを一括削除',
+            ),
+            IconButton(
+              icon: const Icon(Icons.paste),
+              onPressed: _clipboard.isNotEmpty ? _pasteClipboard : null,
+              tooltip: 'ペースト (+40px オフセット)',
+            ),
+          ],
+          IconButton(
             icon: Icon(
                 _deleteMode ? Icons.delete_forever : Icons.delete_outline),
             onPressed: _toggleDeleteMode,
@@ -617,22 +720,40 @@ class _GsnEditorState extends State<GsnEditor> {
           IconButton(
               onPressed: _exportJson,
               icon: const Icon(Icons.save_alt),
-              tooltip: 'JSON保存'),
+              tooltip: 'JSON保存（ローカル）'),
            IconButton(
               onPressed: _evaluateGsn,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
               tooltip: 'サーバーで評価'),
-          /*IconButton(
-            icon: const Icon(Icons.cloud_download),
-            tooltip: 'サーバから読み込み',
-            onPressed: _loadDiagramFromServer, // <-- 作成した関数を呼び出す
-          ),*/
           // ローカルファイルから読み込むボタン
           IconButton(
             onPressed: _importJson,
             icon: const Icon(Icons.folder_open),
             tooltip: 'ローカルJSON読み込み',
           ),
+          // Google Drive 連携ボタン群
+          IconButton(
+            icon: Icon(
+              _isDriveSignedIn ? Icons.account_circle : Icons.account_circle_outlined,
+              color: _isDriveSignedIn ? Colors.green : null,
+            ),
+            onPressed: _toggleDriveSignIn,
+            tooltip: _isDriveSignedIn
+                ? 'Googleサインアウト（${_driveService.currentUser?.email ?? ""}）'
+                : 'Googleサインイン',
+          ),
+          if (_isDriveSignedIn) ...[
+            IconButton(
+              icon: const Icon(Icons.cloud_upload),
+              onPressed: _saveToDrive,
+              tooltip: 'Driveに保存',
+            ),
+            IconButton(
+              icon: const Icon(Icons.cloud_download),
+              onPressed: _loadFromDrive,
+              tooltip: 'Driveから読み込み',
+            ),
+          ],
           IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: '図をすべて削除（リセット）',
@@ -640,14 +761,21 @@ class _GsnEditorState extends State<GsnEditor> {
           ),
         ],
       ),
-      body: Stack(
+      body: Row(
         children: [
-          DragTarget<GsnNodeType>(
-            builder: (context, candidateData, rejectedData) {
-              return GestureDetector(
+          const SingleChildScrollView(
+            child: GsnPalette(),
+          ),
+          Expanded(
+            child: DragTarget<GsnNodeType>(
+              key: _dragTargetKey,
+              builder: (context, candidateData, rejectedData) {
+                return GestureDetector(
                 onTapDown: (e) {
                   final sceneP = _tc.toScene(e.localPosition);
-                  if (_deleteMode) {
+                  if (_selectionMode) {
+                    // 選択解除はonTapで行う（onTapDownはドラッグ開始時にも発火するため）
+                  } else if (_deleteMode) {
                   } else if (_connecting != null) {
                     setState(() => _connecting = null);
                   } else {
@@ -659,11 +787,45 @@ class _GsnEditorState extends State<GsnEditor> {
                     }
                   }
                 },
+                onTap: () {
+                  // 選択モード中に空白部分をタップしたら選択解除
+                  // (ノード上のタップはノード側のGestureDetectorが勝つためここには来ない)
+                  if (_selectionMode) {
+                    _clearSelection();
+                  }
+                },
+                onPanStart: !_selectionMode ? null : (d) {
+                  setState(() {
+                    _selectionRectStart = _tc.toScene(d.localPosition);
+                    _selectionRectEnd = _tc.toScene(d.localPosition);
+                  });
+                },
+                onPanUpdate: !_selectionMode ? null : (d) {
+                  setState(() {
+                    _selectionRectEnd = _tc.toScene(d.localPosition);
+                  });
+                },
+                onPanEnd: !_selectionMode ? null : (d) {
+                  if (_selectionRectStart != null && _selectionRectEnd != null) {
+                    final rect = Rect.fromPoints(_selectionRectStart!, _selectionRectEnd!);
+                    setState(() {
+                      for (final n in _nodes) {
+                        final nodeRect = Rect.fromLTWH(
+                            n.position.dx, n.position.dy, n.width, n.height);
+                        if (rect.overlaps(nodeRect)) {
+                          _selectedNodeIds.add(n.id);
+                        }
+                      }
+                      _selectionRectStart = null;
+                      _selectionRectEnd = null;
+                    });
+                  }
+                },
                 child: InteractiveViewer(
                   transformationController: _tc,
                   minScale: 0.25,
                   maxScale: 4,
-                  panEnabled: true,
+                  panEnabled: !_selectionMode,
                   scaleEnabled: true,
                   constrained: false,
                   boundaryMargin: const EdgeInsets.all(2000),
@@ -671,13 +833,39 @@ class _GsnEditorState extends State<GsnEditor> {
                     width: _worldSize.width,
                     height: _worldSize.height,
                     child: Stack(
+                      clipBehavior: Clip.none,
                       children: [
+                        if (_gridSnapEnabled)
+                          Positioned.fill(
+                            child: CustomPaint(
+                              painter: GridPainter(gridSize: _gridSize),
+                            ),
+                          ),
                         Positioned.fill(
                           child: CustomPaint(
                             painter: GsnEdgePainter(_nodes, _edges,
                                 connectingId: _connecting),
                           ),
                         ),
+                        if (_selectionMode &&
+                            _selectionRectStart != null &&
+                            _selectionRectEnd != null)
+                          Positioned(
+                            left: min(_selectionRectStart!.dx, _selectionRectEnd!.dx),
+                            top: min(_selectionRectStart!.dy, _selectionRectEnd!.dy),
+                            child: IgnorePointer(
+                              child: Container(
+                                width: (_selectionRectStart!.dx - _selectionRectEnd!.dx).abs(),
+                                height: (_selectionRectStart!.dy - _selectionRectEnd!.dy).abs(),
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                      color: Colors.blue.withOpacity(0.8),
+                                      width: 1.5),
+                                  color: Colors.blue.withOpacity(0.1),
+                                ),
+                              ),
+                            ),
+                          ),
                         ..._nodes.map((node) {
                           final isConnecting = _connecting == node.id;
                           return Positioned(
@@ -685,10 +873,37 @@ class _GsnEditorState extends State<GsnEditor> {
                             top: node.position.dy,
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
-                              onTap: () => _handleTapNode(node),
+                              onTap: () {
+                                if (_selectionMode) {
+                                  setState(() {
+                                    if (_selectedNodeIds.contains(node.id)) {
+                                      _selectedNodeIds.remove(node.id);
+                                    } else {
+                                      _selectedNodeIds.add(node.id);
+                                    }
+                                  });
+                                } else {
+                                  _handleTapNode(node);
+                                }
+                              },
+                              onPanStart: (_) => _saveToHistory(),
                               onPanUpdate: (d) {
                                 final scale = _tc.value.getMaxScaleOnAxis();
-                                setState(() => node.position += d.delta / scale);
+                                setState(() {
+                                  if (_selectionMode &&
+                                      _selectedNodeIds.contains(node.id)) {
+                                    // 選択中の全ノードを一括移動
+                                    for (final n in _nodes) {
+                                      if (_selectedNodeIds.contains(n.id)) {
+                                        n.position = _snapToGrid(
+                                            n.position + d.delta / scale);
+                                      }
+                                    }
+                                  } else {
+                                    node.position = _snapToGrid(
+                                        node.position + d.delta / scale);
+                                  }
+                                });
                               },
                               onPanEnd: (d) => _saveToLocalStorage(),
                               onDoubleTap: () =>
@@ -708,6 +923,26 @@ class _GsnEditorState extends State<GsnEditor> {
                                         )
                                       ]),
                                     ),
+                                  // 選択ハイライト
+                                  if (_selectionMode &&
+                                      _selectedNodeIds.contains(node.id))
+                                    Positioned(
+                                      left: -3,
+                                      top: -3,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          width: node.width + 6,
+                                          height: node.height + 6,
+                                          decoration: BoxDecoration(
+                                            border: Border.all(
+                                                color: Colors.orange,
+                                                width: 3),
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                                   _buildGsnShapeWidget(node),
                                   if (_deleteMode)
                                     Positioned(
@@ -724,6 +959,7 @@ class _GsnEditorState extends State<GsnEditor> {
                                     right: -8,
                                     bottom: -8,
                                     child: _ResizeHandle(
+                                      onDragStart: () => _saveToHistory(),
                                       onDrag: (dx, dy) {
                                         final scale =
                                             _tc.value.getMaxScaleOnAxis();
@@ -750,20 +986,22 @@ class _GsnEditorState extends State<GsnEditor> {
               );
             },
             onAcceptWithDetails: (details) {
-              final scenePosition = _tc.toScene(details.offset);
+              // details.offset はグローバル座標のため、
+              // DragTarget のローカル座標に変換してから toScene() に渡す
+              final renderBox = _dragTargetKey.currentContext!
+                  .findRenderObject()! as RenderBox;
+              final localOffset = renderBox.globalToLocal(details.offset);
+              final scenePosition = _tc.toScene(localOffset);
               _addNode(details.data, scenePosition);
             },
           ),
-          const Positioned(
-            top: 10,
-            left: 10,
-            child: GsnPalette(),
-          ),
+        ),
         ],
       ),
     );
   }
 
+  // エッジをクリックしたかを判定する。エッジはfrom下辺中央→to上辺中央の直線として近似し、10px以内をヒットとする。
   bool _hitTestEdge(Offset p, GsnEdge edge) {
     try {
       final fromNode = _nodes.firstWhere((n) => n.id == edge.fromId);
@@ -792,6 +1030,7 @@ class _GsnEditorState extends State<GsnEditor> {
     // ダイアログで使う関数を先に定義する
     void submit() {
       if (ctl.text.isNotEmpty) {
+        _saveToHistory();
         setState(() => node.label = ctl.text);
         _saveToLocalStorage();
       }
@@ -831,9 +1070,310 @@ class _GsnEditorState extends State<GsnEditor> {
       ..click();
     html.Url.revokeObjectUrl(url);
   }
+
+  // ---- Google Drive 連携 ----
+
+  /// サインイン／サインアウトを切り替える
+  Future<void> _toggleDriveSignIn() async {
+    try {
+      if (_isDriveSignedIn) {
+        await _driveService.signOut();
+        if (mounted) {
+          setState(() => _isDriveSignedIn = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Google ドライブからサインアウトしました。')),
+          );
+        }
+      } else {
+        final account = await _driveService.signIn();
+        if (mounted) {
+          if (account != null) {
+            setState(() => _isDriveSignedIn = true);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('${account.email} でサインインしました。')),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('サインインがキャンセルされました。')),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('エラー: $e')),
+        );
+      }
+    }
+  }
+
+  /// 保存ダイアログを表示して Google Drive に保存する
+  Future<void> _saveToDrive() async {
+    if (!_isDriveSignedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('先にGoogleアカウントでサインインしてください。')),
+      );
+      return;
+    }
+
+    // フォルダ一覧を取得
+    List<DriveItem> folders = [];
+    try {
+      folders = await _driveService.listFolders();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    // 保存ダイアログを表示
+    final result = await showDialog<_DriveSaveParams>(
+      context: context,
+      builder: (ctx) => _DriveSaveDialog(folders: folders),
+    );
+    if (result == null) return; // キャンセル
+
+    try {
+      final data = {
+        'nodes': _nodes.map((n) => n.toJson()).toList(),
+        'edges': _edges.map((e) => e.toJson()).toList(),
+        'nodeCounter': _nodeCounter,
+      };
+      final jsonString = const JsonEncoder.withIndent('  ').convert(data);
+      await _driveService.saveFile(
+        jsonString,
+        result.fileName,
+        folderId: result.folderId,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('「${result.fileName}.json」を Google ドライブに保存しました。')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存に失敗しました: $e')),
+        );
+      }
+    }
+  }
+
+  /// ファイル一覧ダイアログを表示して Google Drive から読み込む
+  Future<void> _loadFromDrive() async {
+    if (!_isDriveSignedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('先にGoogleアカウントでサインインしてください。')),
+      );
+      return;
+    }
+
+    // ファイル一覧を取得（マイドライブ全体から検索）
+    List<DriveItem> files = [];
+    try {
+      files = await _driveService.listJsonFiles();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ファイル一覧の取得に失敗しました: $e')),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+
+    if (files.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Google ドライブに JSON ファイルが見つかりませんでした。')),
+      );
+      return;
+    }
+
+    // ファイル選択ダイアログを表示
+    final selected = await showDialog<DriveItem>(
+      context: context,
+      builder: (ctx) => _DriveLoadDialog(files: files),
+    );
+    if (selected == null) return; // キャンセル
+
+    try {
+      final jsonString = await _driveService.loadFileById(selected.id);
+      final data = jsonDecode(jsonString);
+      _saveToHistory();
+      setState(() {
+        _nodes.clear();
+        _edges.clear();
+        _nodes.addAll((data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
+        _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
+        _nodeCounter = data['nodeCounter'] ?? 0;
+      });
+      _saveToLocalStorage();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('「${selected.name}」を読み込みました。')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('読み込みに失敗しました: $e')),
+        );
+      }
+    }
+  }
+}
+
+// ---- Drive 保存ダイアログ ----
+
+class _DriveSaveParams {
+  final String fileName;
+  final String folderId;
+  const _DriveSaveParams({required this.fileName, required this.folderId});
+}
+
+class _DriveSaveDialog extends StatefulWidget {
+  final List<DriveItem> folders;
+  const _DriveSaveDialog({required this.folders});
+
+  @override
+  State<_DriveSaveDialog> createState() => _DriveSaveDialogState();
+}
+
+class _DriveSaveDialogState extends State<_DriveSaveDialog> {
+  final _nameController = TextEditingController(text: 'gsn');
+  String _selectedFolderId = 'root';
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Drive に保存'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('ファイル名'),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _nameController,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(left: 6),
+                  child: Text('.json', style: TextStyle(color: Colors.grey)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const Text('保存先フォルダ'),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              value: _selectedFolderId,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: [
+                const DropdownMenuItem(
+                  value: 'root',
+                  child: Text('マイドライブ（ルート）'),
+                ),
+                ...widget.folders.map((f) => DropdownMenuItem(
+                      value: f.id,
+                      child: Text(f.name),
+                    )),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                setState(() {
+                  _selectedFolderId = v;
+                });
+              },
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('キャンセル'),
+        ),
+        ElevatedButton(
+          onPressed: () {
+            final name = _nameController.text.trim();
+            if (name.isEmpty) return;
+            Navigator.pop(
+              context,
+              _DriveSaveParams(
+                fileName: name,
+                folderId: _selectedFolderId,
+              ),
+            );
+          },
+          child: const Text('保存'),
+        ),
+      ],
+    );
+  }
+}
+
+// ---- Drive 読み込みダイアログ ----
+
+class _DriveLoadDialog extends StatelessWidget {
+  final List<DriveItem> files;
+  const _DriveLoadDialog({required this.files});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Drive から読み込む'),
+      content: SizedBox(
+        width: 400,
+        child: ListView.separated(
+          shrinkWrap: true,
+          itemCount: files.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (ctx, i) {
+            final f = files[i];
+            final modified = f.modifiedTime != null
+                ? f.modifiedTime!.substring(0, 10)
+                : '';
+            return ListTile(
+              leading: const Icon(Icons.insert_drive_file),
+              title: Text(f.name),
+              subtitle: modified.isNotEmpty ? Text('更新: $modified') : null,
+              onTap: () => Navigator.pop(context, f),
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('キャンセル'),
+        ),
+      ],
+    );
+  }
 }
 
 
+// ノードタイプ別の形状ウィジェットを返す。
+// Application/Mapはキャンバス上ではラベルを非表示にする（図形の形だけで型が識別できるため）。
 Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
   final labelStyle = TextStyle(
     fontSize: isPalette ? 10 : 12,
@@ -848,8 +1388,9 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
         node.label,
         textAlign: TextAlign.center,
         style: labelStyle,
-        overflow: TextOverflow.ellipsis,
-        maxLines: isPalette ? 2 : 5,
+        softWrap: true,
+        overflow: TextOverflow.clip,
+        maxLines: isPalette ? 2 : null,
       ),
     ),
   );
@@ -880,7 +1421,11 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
     case GsnNodeType.record:
       return buildPainter(RecordPainter());
     case GsnNodeType.lambda:
-      return buildPainter(LambdaPainter());
+      // ラベルを楕円内部に描画するため CustomPaint に直接渡す
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: LambdaPainter(label: node.label),
+      );
     case GsnNodeType.application:
     // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
       if (isPalette) {
@@ -894,17 +1439,6 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
           painter: ApplicationPainter(),
         );
       }
-/*    case GsnNodeType.hub:
-    // もしパレット上ならラベルを表示し、キャンバス上なら表示しない
-      if (isPalette) {
-        return buildPainter(HubPainter()); // buildPainterはPainterとlabelを両方描画する
-      } else {
-        // CustomPaintを直接使ってPainterのみ描画する
-        return CustomPaint(
-          size: Size(node.width, node.height),
-          painter: HubPainter(),
-        );
-      }*/
     case GsnNodeType.map:
       if (isPalette) {
         return buildPainter(MapPainter());
@@ -942,32 +1476,80 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
 class GsnPalette extends StatelessWidget {
   const GsnPalette({super.key});
 
+  // パレットの表示順とグループ定義
+  static const _groups = [
+    _PaletteGroup(
+      label: 'GSN',
+      types: [
+        GsnNodeType.goal,
+        GsnNodeType.strategy,
+        GsnNodeType.context,
+        GsnNodeType.evidence,
+        GsnNodeType.undeveloped,
+      ],
+    ),
+    _PaletteGroup(
+      label: 'λ 計算',
+      types: [
+        GsnNodeType.lambda,
+        GsnNodeType.application,
+        GsnNodeType.map,
+        GsnNodeType.x,
+      ],
+    ),
+    _PaletteGroup(
+      label: 'レコード',
+      types: [
+        GsnNodeType.record,
+        GsnNodeType.recordLabel,
+        GsnNodeType.recordAccess,
+        GsnNodeType.stringLiteral,
+      ],
+    ),
+  ];
+
   @override
   Widget build(BuildContext context) {
-    // 画面の高さを取得
-    final screenHeight = MediaQuery.of(context).size.height;
-
     return Card(
       elevation: 4,
-      child: Container(
-        // パレットの高さを画面の80%に制限（これを超えるとスクロールする）
-        constraints: BoxConstraints(
-          maxHeight: screenHeight * 0.8,
-        ),
-        padding: const EdgeInsets.all(8.0),
-        // ここでスクロール可能にする
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: GsnNodeType.values
-                .map((type) => _PaletteItem(type: type))
-                .toList(),
-          ),
+      margin: EdgeInsets.zero,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            for (final group in _groups) ...[
+              // セクションヘッダー
+              Padding(
+                padding: const EdgeInsets.only(top: 8.0, bottom: 2.0),
+                child: Text(
+                  group.label,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black54,
+                    letterSpacing: 1.0,
+                  ),
+                ),
+              ),
+              const Divider(height: 4, thickness: 1),
+              // グループ内のノード
+              for (final type in group.types) _PaletteItem(type: type),
+            ],
+          ],
         ),
       ),
     );
   }
+}
+
+// パレットのグループ定義クラス
+class _PaletteGroup {
+  final String label;
+  final List<GsnNodeType> types;
+  const _PaletteGroup({required this.label, required this.types});
 }
 
 class _PaletteItem extends StatelessWidget {
@@ -1035,9 +1617,10 @@ class _PaletteItem extends StatelessWidget {
 }
 
 class _ResizeHandle extends StatelessWidget {
+  final VoidCallback? onDragStart;
   final void Function(double dx, double dy) onDrag;
   final VoidCallback onDragEnd;
-  const _ResizeHandle({required this.onDrag, required this.onDragEnd});
+  const _ResizeHandle({this.onDragStart, required this.onDrag, required this.onDragEnd});
 
   @override
   Widget build(BuildContext context) {
@@ -1045,6 +1628,7 @@ class _ResizeHandle extends StatelessWidget {
       cursor: SystemMouseCursors.resizeUpLeftDownRight,
       child: GestureDetector(
         behavior: HitTestBehavior.translucent,
+        onPanStart: (_) => onDragStart?.call(),
         onPanUpdate: (d) => onDrag(d.delta.dx, d.delta.dy),
         onPanEnd: (d) => onDragEnd(),
         child: Container(
@@ -1063,8 +1647,29 @@ class _ResizeHandle extends StatelessWidget {
   }
 }
 
-// main.dart ファイル内の既存の GsnEdgePainter クラスを
-// 以下のコードで「置き換え」てください。
+class GridPainter extends CustomPainter {
+  final double gridSize;
+
+  GridPainter({required this.gridSize});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.grey.withOpacity(0.25)
+      ..strokeWidth = 0.5;
+
+    for (double x = 0; x < size.width; x += gridSize) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    for (double y = 0; y < size.height; y += gridSize) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant GridPainter oldDelegate) =>
+      oldDelegate.gridSize != gridSize;
+}
 
 class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
@@ -1115,11 +1720,51 @@ class GsnEdgePainter extends CustomPainter {
   }
 
   // ----------------------------------------------------
-  // Helper: 特殊ノードの接続候補点リストを取得
+  // 補助: Application/Map ノードの接続点を「役割」で決定する
+  //   nodeIsFrom == true  → このノードが送り出し側（from）
+  //   nodeIsFrom == false → このノードが受け取り側（to）
+  // ----------------------------------------------------
+  static const _callableTypes = {
+    GsnNodeType.lambda,
+    GsnNodeType.application,
+    GsnNodeType.x,
+    GsnNodeType.map,
+  };
+
+  // RecordLabel / RecordAccess は中央の縦線を接続点とするノード。
+  // 常に topCenter（上端の線上）/ bottomCenter（下端の線上）で繋ぐ。
+  static bool _usesLineCenterConnection(GsnNode node) =>
+      node.type == GsnNodeType.recordLabel ||
+      node.type == GsnNodeType.recordAccess;
+
+  Offset _getAppOrMapPoint(
+      GsnNode node, Rect rect, GsnNode otherNode, bool nodeIsFrom) {
+    const double hubRatio = 0.4;
+    const double hubCenterRatio = hubRatio * 0.5;
+
+    // Application は縦線のX座標、Map はノード中央のX座標を使う
+    final double lineX = node.type == GsnNodeType.application
+        ? rect.left + node.width * hubCenterRatio
+        : rect.center.dx;
+
+    final topPoint    = Offset(lineX, rect.top);
+    final bottomPoint = Offset(lineX, rect.bottom);
+    final rightPoint  = Offset(rect.right, rect.center.dy);
+
+    if (!nodeIsFrom) {
+      // 受け取り側（親から繋がれる）→ 常に上
+      return topPoint;
+    }
+    // 送り出し側: 相手が callable なら下、それ以外（引数）なら右
+    return _callableTypes.contains(otherNode.type) ? bottomPoint : rightPoint;
+  }
+
+  // ----------------------------------------------------
+  // 補助: 特殊ノード（Lambda/Application/Map）の接続候補点リストを取得する
   // ----------------------------------------------------
   List<Offset> _getSpecialPoints(GsnNode node, Rect rect) {
     if (node.type == GsnNodeType.lambda) {
-      // Lambdaノードの接続点 (左側のT-コネクタの上下端)
+      // Lambdaノードの接続点: 左側Tコネクタの上端・下端
       const double wRatioTee = 0.25;
       final double wTee = node.width * wRatioTee;
       final double tBarX = rect.left + wTee / 2;
@@ -1128,7 +1773,7 @@ class GsnEdgePainter extends CustomPainter {
       final specialBottom = Offset(tBarX, rect.bottom);
       return [specialTop, specialBottom];
     } else if (node.type == GsnNodeType.application) {
-      // Applicationノードの接続点 (縦線の上、下、右端)
+      // Applicationノードの接続点: 縦線の上端・下端・右端
       const double hubRatio = 0.4;
       const double hubCenterRatio = hubRatio * 0.5;
       final double lineX = rect.left + node.width * hubCenterRatio;
@@ -1138,7 +1783,7 @@ class GsnEdgePainter extends CustomPainter {
       final specialRight = Offset(rect.right, rect.center.dy);
       return [specialTop, specialBottom, specialRight];
     } else if (node.type == GsnNodeType.map) {
-      // Mapノードの接続点 (シンボルの中央線上の黒い四角形の上端、下端、右端)
+      // Mapノードの接続点: 中央の黒い四角形の上端・下端・右端
       final rectSize = node.width * 0.4;
       final halfRectSize = rectSize / 2;
 
@@ -1155,7 +1800,7 @@ class GsnEdgePainter extends CustomPainter {
   }
 
   // ----------------------------------------------------
-  // paint メソッド本体
+  // 描画処理の本体: 全エッジを走査して線を引く
   // ----------------------------------------------------
   @override
   void paint(Canvas canvas, Size size) {
@@ -1178,7 +1823,11 @@ class GsnEdgePainter extends CustomPainter {
             : (isSelected ? Colors.blue.shade800 : Colors.black)
         ..strokeWidth = isSelected ? 3 : 2;
 
-Offset startPoint, endPoint;
+Offset startPoint = Offset.zero;
+Offset endPoint   = Offset.zero;
+// Map引数用L字接続の折れ点（null = 直線で描画）
+Offset? _bend1;
+Offset? _bend2;
 
       // 特殊ノード判定
       final bool fromIsLambda = fromNode.type == GsnNodeType.lambda;
@@ -1203,82 +1852,105 @@ Offset startPoint, endPoint;
 
 
       // ----------------------------------------------------
-      // Case 1 & 2: 両方のノードが特殊ノードの場合 (同じ種類同士も含む)
+      // ケース1・2: 両方のノードが特殊ノード（Lambda/Application/Map）の場合
       // ----------------------------------------------------
       if (fromIsSpecial && toIsSpecial) {
-          // 修正: fromIsSpecial && toIsSpecial の条件で統一的な処理を行う
           final fromRect = Rect.fromLTWH(fromNode.position.dx, fromNode.position.dy, fromNode.width, fromNode.height);
-          final toRect = Rect.fromLTWH(toNode.position.dx, toNode.position.dy, toNode.width, toNode.height);
+          final toRect   = Rect.fromLTWH(toNode.position.dx,   toNode.position.dy,   toNode.width,   toNode.height);
 
-          final fromPoints = _getSpecialPoints(fromNode, fromRect);
-          final toPoints = _getSpecialPoints(toNode, toRect);
-
-          double minDistanceSquared = double.infinity;
-          Offset closestStartPoint = Offset.zero;
-          Offset closestEndPoint = Offset.zero;
-
-          // 総当たりで最短距離のペアを探す
-          for (final p1 in fromPoints) {
-              for (final p2 in toPoints) {
-                  final distSquared = (p1 - p2).distanceSquared;
-                  if (distSquared < minDistanceSquared) {
-                      minDistanceSquared = distSquared;
-                      closestStartPoint = p1;
-                      closestEndPoint = p2;
-                  }
-              }
+          // Application/Map が絡む場合: 役割（送り出し/受け取り）で接続点を決める
+          if (fromIsApplication || fromIsMap) {
+            startPoint = _getAppOrMapPoint(fromNode, fromRect, toNode, true);
+          }
+          if (toIsApplication || toIsMap) {
+            endPoint = _getAppOrMapPoint(toNode, toRect, fromNode, false);
           }
 
-          startPoint = closestStartPoint;
-          endPoint = closestEndPoint;
+          // Lambda 同士など Application/Map が絡まない場合: 最短距離で接続点を決める
+          if (!fromIsApplication && !fromIsMap && !toIsApplication && !toIsMap) {
+            final fromPoints = _getSpecialPoints(fromNode, fromRect);
+            final toPoints   = _getSpecialPoints(toNode,   toRect);
+            double minDist = double.infinity;
+            startPoint = fromPoints.first;
+            endPoint   = toPoints.first;
+            for (final p1 in fromPoints) {
+              for (final p2 in toPoints) {
+                final d = (p1 - p2).distanceSquared;
+                if (d < minDist) { minDist = d; startPoint = p1; endPoint = p2; }
+              }
+            }
+          } else {
+            // 役割ベースで片方が確定している場合、もう片方を距離で補完
+            if (!fromIsApplication && !fromIsMap) {
+              final fromPoints = _getSpecialPoints(fromNode, fromRect);
+              startPoint = fromPoints.reduce((a, b) =>
+                  (a - endPoint).distanceSquared < (b - endPoint).distanceSquared ? a : b);
+            }
+            if (!toIsApplication && !toIsMap) {
+              final toPoints = _getSpecialPoints(toNode, toRect);
+              endPoint = toPoints.reduce((a, b) =>
+                  (a - startPoint).distanceSquared < (b - startPoint).distanceSquared ? a : b);
+            }
+          }
 
       } else if (fromIsSpecial || toIsSpecial) {
 
           // ----------------------------------------------------
-          // Case 3: 片方のみが特殊ノードの場合 (既存の優先度ロジックを保持)
+          // ケース3: 片方のみが特殊ノードの場合
           // ----------------------------------------------------
+          final fromRect = Rect.fromLTWH(fromNode.position.dx, fromNode.position.dy, fromNode.width, fromNode.height);
+          final toRect   = Rect.fromLTWH(toNode.position.dx,   toNode.position.dy,   toNode.width,   toNode.height);
 
-          GsnNode specialNode;
-          GsnNode otherNode;
-          // GsnNodeType specialType; // 使用しないため削除
-
-          // 優先度: Lambda > Application > Map
-          if (fromIsLambda || toIsLambda) {
-              specialNode = fromIsLambda ? fromNode : toNode;
-              otherNode = fromIsLambda ? toNode : fromNode;
-          } else if (fromIsApplication || toIsApplication) {
-              specialNode = fromIsApplication ? fromNode : toNode;
-              otherNode = fromIsApplication ? toNode : fromNode;
+          if (fromIsApplication || fromIsMap) {
+            // Application/Map が送り出し側（from） → 役割で接続点を決める
+            startPoint = _getAppOrMapPoint(fromNode, fromRect, toNode, true);
+            // RecordLabel/RecordAccess は中央線（topCenter）で受け取る
+            if (_usesLineCenterConnection(toNode)) {
+              endPoint = toRect.topCenter;
+            // Map の引数（右端から伸びる）→ L字折れ線で引数の上辺中央へ
+            } else if (fromIsMap &&
+                !_callableTypes.contains(toNode.type) &&
+                startPoint.dx >= fromRect.center.dx) {
+              endPoint = toRect.topCenter;
+              // 折れ点: Map右端と同じy、引数のcenter.dxの真上で折れて垂直に下りる
+              _bend1 = Offset(toRect.center.dx, startPoint.dy);
+              _bend2 = null; // 折れ点は1つだけ（水平→垂直の2セグメント）
+            } else {
+              endPoint = _getNearestPointOnRect(toRect, startPoint);
+            }
+          } else if (toIsApplication || toIsMap) {
+            // Application/Map が受け取り側（to） → 役割で接続点を決める
+            endPoint   = _getAppOrMapPoint(toNode, toRect, fromNode, false);
+            // RecordLabel/RecordAccess は中央線（bottomCenter）から送り出す
+            startPoint = _usesLineCenterConnection(fromNode)
+                ? fromRect.bottomCenter
+                : _getNearestPointOnRect(fromRect, endPoint);
           } else {
-              specialNode = fromIsMap ? fromNode : toNode;
-              otherNode = fromIsMap ? toNode : fromNode;
-          }
+            // Lambda が特殊ノード → 最短距離で接続点を決める
+            GsnNode specialNode = fromIsLambda ? fromNode : toNode;
+            GsnNode otherNode   = fromIsLambda ? toNode   : fromNode;
+            final specialRect   = fromIsLambda ? fromRect : toRect;
+            final otherRect     = fromIsLambda ? toRect   : fromRect;
 
-          final specialNodeRect = Rect.fromLTWH(specialNode.position.dx, specialNode.position.dy, specialNode.width, specialNode.height);
-          final otherNodeRect = Rect.fromLTWH(otherNode.position.dx, otherNode.position.dy, otherNode.width, otherNode.height);
-          final otherCenter = otherNodeRect.center;
+            final points = _getSpecialPoints(specialNode, specialRect);
+            final closestPt = points.reduce((a, b) =>
+                (a - otherRect.center).distanceSquared <
+                        (b - otherRect.center).distanceSquared
+                    ? a
+                    : b);
 
-          // specialNodeのタイプに基づいて接続候補点を計算
-          List<Offset> points = _getSpecialPoints(specialNode, specialNodeRect);
-
-          // 相手ノードの中心に最も近い接続ポイントを選択
-          final closestSpecialPoint = points.reduce((a, b) =>
-              (a - otherCenter).distanceSquared < (b - otherCenter).distanceSquared
-                  ? a
-                  : b);
-
-          // 接続点の決定
-          if (specialNode == fromNode) {
-              startPoint = closestSpecialPoint;
-              endPoint = _getNearestPointOnRect(otherNodeRect, closestSpecialPoint);
-          } else {
-              startPoint = _getNearestPointOnRect(otherNodeRect, closestSpecialPoint);
-              endPoint = closestSpecialPoint;
+            if (specialNode == fromNode) {
+              startPoint = closestPt;
+              endPoint   = _getNearestPointOnRect(otherRect, closestPt);
+            } else {
+              startPoint = _getNearestPointOnRect(otherRect, closestPt);
+              endPoint   = closestPt;
+            }
           }
 
       } else {
           // ----------------------------------------------------
-          // Case 4: 通常ノード同士の接続
+          // ケース4: 通常ノード同士の接続（GSN要素など）
           // ----------------------------------------------------
           final fromRect = Rect.fromLTWH(
             fromNode.position.dx,
@@ -1295,19 +1967,52 @@ Offset startPoint, endPoint;
 
 
 
-          // スタート地点：fromNodeの真ん中下
-          startPoint = fromRect.bottomCenter;
+          // Context / Assumption は横からエッジを繋ぐ
+          // Contextがfromノードより右にあれば右辺→左辺、左なら左辺→右辺
+          final toIsContext = toNode.type == GsnNodeType.context;
+          final fromIsContext = fromNode.type == GsnNodeType.context;
 
-          // エンド地点：toNodeの真ん中上
-          endPoint = toRect.topCenter;
+          if (toIsContext || fromIsContext) {
+            // どちらがContextかを判断して、横方向に接続する
+            final contextRect  = toIsContext ? toRect   : fromRect;
+            final goalRect     = toIsContext ? fromRect : toRect;
+
+            // ContextがGoalより右にあるか左にあるかで接続辺を決める
+            if (contextRect.center.dx >= goalRect.center.dx) {
+              // Contextが右側 → Goalの右辺 → Contextの左辺
+              startPoint = toIsContext ? goalRect.centerRight    : contextRect.centerRight;
+              endPoint   = toIsContext ? contextRect.centerLeft  : goalRect.centerLeft;
+            } else {
+              // Contextが左側 → Goalの左辺 → Contextの右辺
+              startPoint = toIsContext ? goalRect.centerLeft     : contextRect.centerLeft;
+              endPoint   = toIsContext ? contextRect.centerRight : goalRect.centerRight;
+            }
+          } else {
+            // スタート地点：fromNodeの真ん中下
+            startPoint = fromRect.bottomCenter;
+
+            // エンド地点：toNodeの真ん中上
+            endPoint = toRect.topCenter;
+          }
       }
 
 
-      // 線を描画
-      canvas.drawLine(startPoint, endPoint, paint);
+      // 線を描画（Map引数はL字折れ線、それ以外は直線）
+      if (_bend1 != null) {
+        // L字折れ線: startPoint → bend1 → (bend2 →) endPoint
+        final path = Path()
+          ..moveTo(startPoint.dx, startPoint.dy)
+          ..lineTo(_bend1!.dx, _bend1!.dy);
+        if (_bend2 != null) path.lineTo(_bend2!.dx, _bend2!.dy);
+        path.lineTo(endPoint.dx, endPoint.dy);
+        canvas.drawPath(path, paint..style = PaintingStyle.stroke);
+      } else {
+        canvas.drawLine(startPoint, endPoint, paint);
+      }
 
-      // 矢印の描画 (変更なし)
-      final Offset direction = (endPoint - startPoint);
+      // 矢印の向きは最後のセグメントの方向で決める
+      final Offset arrowFrom = _bend2 ?? _bend1 ?? startPoint;
+      final Offset direction = (endPoint - arrowFrom);
       final double distance = direction.distance;
       final Offset normalizedDirection =
           distance == 0 ? Offset.zero : direction / distance;
@@ -1492,8 +2197,8 @@ class RecordPainter extends CustomPainter {
 
 
 class LambdaPainter extends CustomPainter {
-  // 色は白に固定し、枠線は黒に固定
-  LambdaPainter();
+  final String label;
+  LambdaPainter({required this.label});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1512,7 +2217,6 @@ class LambdaPainter extends CustomPainter {
     const double wRatioTee = 0.25;
     const double wRatioTriangle = 0.10;
     const double triangleHeightRatio = 0.5; // 三角形の高さをノード全体の高さの50%に制限
-    // 垂直線の長さを元の20.0pxに戻す
     final double tBarLength = size.height * 0.5;
 
     final double wTee = size.width * wRatioTee;
@@ -1520,35 +2224,30 @@ class LambdaPainter extends CustomPainter {
     final double wOval = size.width - wTee - wTriangle;
 
     // 形状の開始・終了X座標
-    final double xTeeEnd = wTee; // Tと三角形の境界
+    final double xTeeEnd = wTee;        // Tと三角形の境界
     final double xTriangleEnd = wTee + wTriangle; // 三角形と楕円の境界
     final double centerY = size.height / 2;
 
     // 三角形の高さ関連
-    final double triangleBaseYTop = centerY - (size.height * triangleHeightRatio) / 2;
+    final double triangleBaseYTop    = centerY - (size.height * triangleHeightRatio) / 2;
     final double triangleBaseYBottom = centerY + (size.height * triangleHeightRatio) / 2;
 
     // Tの垂直線はTコネクタ領域の中央に配置
     final double tBarX = wTee / 2;
 
-
     // --- 2. T-Connectorの描画 ---
-
-    // (A) クロスバーを描画 (垂直線) - 長さはtBarLengthのまま
+    // (A) クロスバー（垂直線）
     canvas.drawLine(
       Offset(tBarX, centerY - tBarLength),
       Offset(tBarX, centerY + tBarLength),
       linePaint,
     );
-
-    // (B) ステム (水平線) を描画: 垂直線から三角形の基部(xTeeEnd)まで接続
-    // **ノード左端への突き出し (Offset(0, centerY)からOffset(tBarX, centerY)の描画)** を削除
+    // (B) ステム（水平線）: 垂直線から三角形の基部まで
     canvas.drawLine(
-      Offset(tBarX, centerY), // Tの垂直線から
-      Offset(xTeeEnd, centerY), // 三角形の基部まで
+      Offset(tBarX, centerY),
+      Offset(xTeeEnd, centerY),
       linePaint,
     );
-
 
     // --- 3. Triangleの描画 (中央部) ---
     final trianglePath = Path()
@@ -1556,7 +2255,6 @@ class LambdaPainter extends CustomPainter {
       ..lineTo(xTriangleEnd, centerY)
       ..lineTo(xTeeEnd, triangleBaseYBottom)
       ..close();
-
     canvas.drawPath(trianglePath, paint);
     canvas.drawPath(trianglePath, borderPaint);
 
@@ -1564,10 +2262,36 @@ class LambdaPainter extends CustomPainter {
     final ovalRect = Rect.fromLTWH(xTriangleEnd, 0, wOval, size.height);
     canvas.drawOval(ovalRect, paint);
     canvas.drawOval(ovalRect, borderPaint);
+
+    // --- 5. 楕円内にラベルテキストを描画 ---
+    if (label.isNotEmpty) {
+      const double padding = 8.0;
+      final textPainter = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(
+            color: Colors.black,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+        maxLines: 3,
+        ellipsis: '...',
+      );
+      // 楕円の幅からパディングを引いた範囲でレイアウト
+      textPainter.layout(maxWidth: wOval - padding * 2);
+      // 楕円の中央に配置
+      final textX = xTriangleEnd + (wOval - textPainter.width) / 2;
+      final textY = (size.height - textPainter.height) / 2;
+      textPainter.paint(canvas, Offset(textX, textY));
+    }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant LambdaPainter oldDelegate) =>
+      oldDelegate.label != label;
 }
 
 
@@ -1618,21 +2342,6 @@ class ApplicationPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-
-/*class HubPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.black
-      ..strokeWidth = 2;
-
-    canvas.drawLine(Offset(size.width * 0.5, 0), Offset(size.width*0.5, size.height), paint);
-    canvas.drawLine(Offset(size.width * 0.5, size.height*0.5), Offset(size.width, size.height*0.5), paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}*/
 
 class MapPainter extends CustomPainter {
   @override
@@ -1804,13 +2513,7 @@ extension on Offset {
   }
 }
 
-// --- 評価結果を表示するための専用ビューア ---
-// main.dart の GsnResultViewer クラスを以下のように修正
-
-// ----------------------------------------------------
-// main.dart の GsnResultViewer クラスを以下に置き換え
-// ----------------------------------------------------
-
+// 評価結果を読み取り専用で表示するダイアログ。エディタの _nodes/_edges は変更しない。
 class GsnResultViewer extends StatelessWidget {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
@@ -1854,6 +2557,7 @@ class GsnResultViewer extends StatelessWidget {
                 width: canvasWidth,
                 height: canvasHeight,
                 child: Stack(
+                  clipBehavior: Clip.none,
                   children: [
                     // エッジの描画
                     CustomPaint(
