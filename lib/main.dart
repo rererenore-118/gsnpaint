@@ -30,7 +30,8 @@ enum GsnNodeType {
   stringLiteral,
   recordLabel,
   record,
-  x
+  x,
+  fileList,
 }
 
 class GsnNode {
@@ -105,6 +106,8 @@ class GsnNode {
         return 'RecordLabel';
       case GsnNodeType.x:
         return 'X';
+      case GsnNodeType.fileList:
+        return 'FileList';
     }
   }
 }
@@ -301,8 +304,13 @@ class _GsnEditorState extends State<GsnEditor> {
   @override
   void initState() {
     super.initState();
-    _loadFromLocalStorage();
+    _clearLocalStorage();
     _initDrive();
+  }
+
+  Future<void> _clearLocalStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('gsn_editor_data');
   }
 
   /// アプリ起動時に前回のサインイン状態を静かに復元する
@@ -755,9 +763,14 @@ class _GsnEditorState extends State<GsnEditor> {
             ),
           ],
           IconButton(
+            icon: const Icon(Icons.upload_file),
+            tooltip: 'CSVをサーバーにアップロード',
+            onPressed: _uploadCsv,
+          ),
+          IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: '図をすべて削除（リセット）',
-            onPressed: _confirmClearDiagram, // <-- 新しいメソッドを呼び出す
+            onPressed: _confirmClearDiagram,
           ),
         ],
       ),
@@ -992,7 +1005,11 @@ class _GsnEditorState extends State<GsnEditor> {
                   .findRenderObject()! as RenderBox;
               final localOffset = renderBox.globalToLocal(details.offset);
               final scenePosition = _tc.toScene(localOffset);
-              _addNode(details.data, scenePosition);
+              if (details.data == GsnNodeType.fileList) {
+                _addFileListNode(scenePosition);
+              } else {
+                _addNode(details.data, scenePosition);
+              }
             },
           ),
         ),
@@ -1055,6 +1072,108 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
+
+  Future<void> _uploadCsv() async {
+    final input = html.FileUploadInputElement()..accept = '.csv';
+    input.click();
+
+    input.onChange.listen((e) async {
+      final files = input.files;
+      if (files == null || files.isEmpty) return;
+
+      final file = files[0];
+      final reader = html.FileReader();
+
+      reader.onLoadEnd.listen((e) async {
+        try {
+          final bytes = reader.result as List<int>;
+          final request = http.MultipartRequest(
+            'POST',
+            Uri.parse('http://localhost:5000/upload'),
+          );
+          request.files.add(http.MultipartFile.fromBytes(
+            'file',
+            bytes,
+            filename: file.name,
+          ));
+
+          final response = await request.send();
+          final body = await response.stream.bytesToString();
+          final decoded = jsonDecode(body);
+
+          if (response.statusCode == 200) {
+            final filename = decoded['filename'] as String;
+            final preview = (decoded['preview'] as List)
+                .map((row) => (row as List).join(', '))
+                .join('\n');
+            _showResultDialog('アップロード完了: $filename', '先頭5行:\n$preview');
+          } else {
+            _showResultDialog('アップロード失敗', decoded['error'] ?? '不明なエラー');
+          }
+        } catch (err) {
+          _showResultDialog('通信エラー', '$err');
+        }
+      });
+
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  Future<void> _addFileListNode(Offset position) async {
+    try {
+      final response = await http.get(Uri.parse('http://localhost:5000/files'));
+      final files = (jsonDecode(response.body)['files'] as List).cast<String>();
+
+      if (!mounted) return;
+
+      if (files.isEmpty) {
+        _showResultDialog('CSVファイルなし', 'まずCSVをサーバーにアップロードしてください。');
+        return;
+      }
+
+      String? selected = files.first;
+
+      await showDialog(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Text('CSVファイルを選択'),
+            content: DropdownButton<String>(
+              value: selected,
+              isExpanded: true,
+              items: files
+                  .map((f) => DropdownMenuItem(value: f, child: Text(f)))
+                  .toList(),
+              onChanged: (v) => setDialogState(() => selected = v),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('キャンセル'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    _nodes.add(GsnNode(
+                      id: _nodeCounter++,
+                      type: GsnNodeType.fileList,
+                      position: position,
+                      label: selected!,
+                    ));
+                  });
+                  _saveToLocalStorage();
+                },
+                child: const Text('追加'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } catch (e) {
+      _showResultDialog('通信エラー', 'サーバーに接続できませんでした。\n$e');
+    }
+  }
 
   void _exportJson() {
     final data = {
@@ -1470,6 +1589,44 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
 
     case GsnNodeType.x:
       return buildPainter(XPainter());
+
+    case GsnNodeType.fileList:
+      return Container(
+        width: node.width,
+        height: node.height,
+        decoration: BoxDecoration(
+          color: Colors.green.shade100,
+          border: Border.all(color: Colors.green.shade700, width: 2),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(6.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.table_chart,
+                    size: isPalette ? 12 : 16,
+                    color: Colors.green.shade800),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    node.label,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: isPalette ? 10 : 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green.shade900,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: isPalette ? 2 : 3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
   }
 }
 
@@ -1504,6 +1661,12 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.recordLabel,
         GsnNodeType.recordAccess,
         GsnNodeType.stringLiteral,
+      ],
+    ),
+    _PaletteGroup(
+      label: 'データ',
+      types: [
+        GsnNodeType.fileList,
       ],
     ),
   ];
