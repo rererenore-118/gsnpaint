@@ -4,16 +4,30 @@
 
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'dart:html' as html;
+// dart:typed_data は package:flutter/services.dart が再エクスポートするため不要
+import 'dart:ui' as ui;
 import 'package:http/http.dart' as http;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'google_drive_service.dart';
 
-void main() => runApp(const MaterialApp(
-  debugShowCheckedModeBanner: false,
-  home: GsnEditor(),
-));
+// PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
+part 'pdf_export.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  // ★追加(接続キャンセル): 右クリックを「接続のキャンセル」に割り当てるため、
+  // ブラウザ標準のコンテキストメニューを止める。
+  BrowserContextMenu.disableContextMenu();
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: GsnEditor(),
+  ));
+}
 
 // Flaskサーバ側の gsn_type 文字列と1対1対応する（_gsnTypeName() で変換）。
 // goal〜evidence がGSNの基本要素、lambda〜x がPGSN拡張のDSL要素。
@@ -23,6 +37,9 @@ enum GsnNodeType {
   context,
   evidence,
   undeveloped,
+  assumption,
+  justification,
+  defeater, // ★追加: Confidence Argument対応。Goal/Strategyへの疑義(反論)を表すノード
   recordAccess,
   lambda,
   application,
@@ -32,6 +49,63 @@ enum GsnNodeType {
   record,
   x,
   fileList,
+}
+
+// Context/Assumption/JustificationはGSN標準のInContextOf関係を持つ要素で、
+// いずれも親ノードの横に配置し、横方向にエッジを繋ぐ（レイアウト・描画の両方で共用）。
+// これらは葉ノード（自身はさらに子を持たない）という前提で共用している。
+const Set<GsnNodeType> _sideAttachedTypes = {
+  GsnNodeType.context,
+  GsnNodeType.assumption,
+  GsnNodeType.justification,
+};
+
+// ★追加(Defeater): Defeaterは「親の横に付く」点はContext等と同じだが、
+// 自分自身の下に反論への応答(Rebuttal)チェーンを展開できる点が異なるため、
+// レイアウト計算では区別できるよう専用セットを用意する。
+// - _expandableSideTypes: 「横に付くが、自分の下にも子を展開する」ノード
+// - _allSideTypes: レイアウト上「親の横バケット」に振り分けるノード全体（既存の副作用を避けるため
+//   エッジ描画の横方向判定(_sideAttachedTypes)はこれまで通り据え置き、Defeaterはそちらに含めない）
+const Set<GsnNodeType> _expandableSideTypes = {
+  GsnNodeType.defeater,
+};
+const Set<GsnNodeType> _allSideTypes = {
+  ..._sideAttachedTypes,
+  ..._expandableSideTypes,
+};
+
+// ★追加(Dialectic): GSN v3のDialectic拡張における"challenges"関係。
+// SupportedBy/InContextOfとは別の第三の関係性として、エッジの終点(to)がDefeaterであることから判定する
+// （エッジ自体にrelation種別を保存するのではなく、ノード種別から導出する。値が常に一致し不整合が起きないため）。
+bool _isChallengesEdge(GsnNode toNode) => toNode.type == GsnNodeType.defeater;
+
+// ★追加(Dialectic): 破線を描画する共通ヘルパー。"challenges"エッジとinDoubt状態のDefeaterの枠線に使う。
+void _drawDashedPath(Canvas canvas, Path path, Paint paint,
+    {double dashWidth = 5, double dashGap = 4}) {
+  for (final metric in path.computeMetrics()) {
+    double distance = 0;
+    while (distance < metric.length) {
+      final len = min(dashWidth, metric.length - distance);
+      canvas.drawPath(metric.extractPath(distance, distance + len), paint);
+      distance += dashWidth + dashGap;
+    }
+  }
+}
+
+// ★追加(Dialectic): DefeaterがGSN v3の言うdefeated(有効な裏付けあり)かinDoubt(未対応)かを判定する。
+// 「未開発(Undeveloped)なGoal的主張による疑義はinDoubt、実際の裏付け(Evidence等)を伴う主張はdefeated」
+// という区別に対応：子(=Defeater自身の主張を支える内容)がUndeveloped以外の形で存在すればdefeated。
+bool _isDefeaterBacked(
+    GsnNode defeaterNode, List<GsnNode> allNodes, List<GsnEdge> edges) {
+  final nodeMap = {for (final n in allNodes) n.id: n};
+  for (final e in edges) {
+    if (e.fromId != defeaterNode.id) continue;
+    final child = nodeMap[e.toId];
+    if (child != null && child.type != GsnNodeType.undeveloped) {
+      return true;
+    }
+  }
+  return false;
 }
 
 class GsnNode {
@@ -90,6 +164,12 @@ class GsnNode {
         return 'Evidence';
       case GsnNodeType.undeveloped:
         return 'Undeveloped';
+      case GsnNodeType.assumption:
+        return 'Assumption';
+      case GsnNodeType.justification:
+        return 'Justification';
+      case GsnNodeType.defeater: // ★追加(Defeater)
+        return 'Defeater';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -173,6 +253,10 @@ class _GsnEditorState extends State<GsnEditor> {
   bool _deleteMode = false;
   // エッジ接続の途中状態: 1回目クリックで選択したノードID。nullなら未選択。
   int? _connecting;
+  // ★追加(接続プレビュー): 接続待ちのあいだカーソルを追う線の終点（シーン座標）。
+  // setStateではなくValueNotifierで保持し、プレビュー線のレイヤーだけを塗り直す
+  // （マウスを動かすたびに図全体をrebuildすると、ノードが増えたときに重くなるため）。
+  final ValueNotifier<Offset?> _connectPreviewEnd = ValueNotifier<Offset?>(null);
 
   // 操作履歴（元に戻す・やり直し）
   final List<_DiagramSnapshot> _undoStack = [];
@@ -195,6 +279,23 @@ class _GsnEditorState extends State<GsnEditor> {
   // クリップボード（コピー&ペースト用）
   List<GsnNode> _clipboard = [];
   List<GsnEdge> _clipboardEdges = [];
+
+  // ★追加(折りたたみ): 折りたたまれているノードのID集合。
+  // ここに入っているノードの子孫(横付け要素も含む)は非表示になる。
+  // セッション内だけの表示状態として扱い、保存/読み込みの対象にはしない
+  // （読み込んだ図は常に全展開の状態で始まる方が分かりやすいため）。
+  final Set<int> _collapsedNodeIds = {};
+  // ★追加(折りたたみ): onTapDownで捉えたローカル座標を、直後のonTapで折りたたみバッジの
+  // 当たり判定に使うための一時保存（onTapは引数なしのため）。onTapを従来通りのシグネチャのまま
+  // 維持し、位置情報だけonTapDownで追加取得する形にして、ジェスチャー認識の挙動を変えないようにする。
+  Offset? _lastTapDownLocalPos;
+  // ★追加(折りたたみ): バッジの描画サイズと当たり判定を1箇所で管理する
+  // （両者がずれると「見えている場所を押しても反応しない」という状態になるため）。
+  static const double _collapseBadgeInset = 2.0; // ノード左上からのオフセット
+  static const double _collapseBadgeSize = 22.0; // 描画される円の直径
+  // 当たり判定はノードの角(0,0)から、バッジの右下端 + 余白まで。押しやすさのため実際の円より広めに取る。
+  static const double _collapseBadgeHitArea =
+      _collapseBadgeInset + _collapseBadgeSize + 6.0;
 
   // Google Drive 連携
   final GoogleDriveService _driveService = GoogleDriveService();
@@ -222,6 +323,57 @@ class _GsnEditorState extends State<GsnEditor> {
       _selectedNodeIds.clear();
       _selectionRectStart = null;
       _selectionRectEnd = null;
+    });
+  }
+
+  // ★追加(折りたたみ): from→childrenのマップを作る共通ヘルパー（_autoLayout内のものと同じ考え方）
+  Map<int, List<int>> _buildChildrenMap() {
+    final map = <int, List<int>>{for (final n in _nodes) n.id: []};
+    for (final e in _edges) {
+      map[e.fromId]?.add(e.toId);
+    }
+    return map;
+  }
+
+  // ★追加(折りたたみ): _collapsedNodeIdsに基づき、非表示にすべきノードID集合を計算する。
+  // 畳んだノードの子孫(横付け要素含む)を再帰的にすべて辿る。
+  Set<int> _computeHiddenNodeIds() {
+    if (_collapsedNodeIds.isEmpty) return const {};
+    final childrenMap = _buildChildrenMap();
+    final hidden = <int>{};
+    void hideDescendants(int nid) {
+      for (final cid in childrenMap[nid] ?? []) {
+        if (hidden.add(cid)) hideDescendants(cid);
+      }
+    }
+    for (final cid in _collapsedNodeIds) {
+      hideDescendants(cid);
+    }
+    return hidden;
+  }
+
+  // ★追加(折りたたみ): 指定ノード配下の子孫の総数（折りたたみ時のバッジ表示用）
+  int _countDescendants(int nodeId) {
+    final childrenMap = _buildChildrenMap();
+    final seen = <int>{};
+    void visit(int nid) {
+      for (final cid in childrenMap[nid] ?? []) {
+        if (seen.add(cid)) visit(cid);
+      }
+    }
+    visit(nodeId);
+    return seen.length;
+  }
+
+  // ★追加(折りたたみ): 折りたたみ状態をトグルする。レイアウトの保存対象ではないため
+  // _saveToLocalStorage()は呼ばない（表示だけの一時的な状態のため）。
+  void _toggleCollapse(int nodeId) {
+    setState(() {
+      if (_collapsedNodeIds.contains(nodeId)) {
+        _collapsedNodeIds.remove(nodeId);
+      } else {
+        _collapsedNodeIds.add(nodeId);
+      }
     });
   }
 
@@ -308,6 +460,12 @@ class _GsnEditorState extends State<GsnEditor> {
     _initDrive();
   }
 
+  @override
+  void dispose() {
+    _connectPreviewEnd.dispose();
+    super.dispose();
+  }
+
   Future<void> _clearLocalStorage() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('gsn_editor_data');
@@ -343,7 +501,7 @@ class _GsnEditorState extends State<GsnEditor> {
     try {
       // サーバーへ送信
       final response = await http.post(
-        Uri.parse('http://127.0.0.1:5000/evaluate'),
+        Uri.parse('https://pgsn-api.onrender.com/evaluate'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode(requestData),
       );
@@ -499,6 +657,276 @@ class _GsnEditorState extends State<GsnEditor> {
     _saveToLocalStorage();
   }
 
+  void _autoLayout() {
+    if (_nodes.isEmpty) return;
+    _saveToHistory();
+
+    const double xGap = 20.0;
+    const double ySpacing = 160.0;
+    const double margin = 50.0;
+    const double ctxSideGap = 40.0;
+
+    final nodeMap = {for (final n in _nodes) n.id: n};
+
+    // 子リスト構築
+    final childrenMap = <int, List<int>>{for (final n in _nodes) n.id: []};
+    final hasParent = <int>{};
+    for (final e in _edges) {
+      childrenMap[e.fromId]?.add(e.toId);
+      hasParent.add(e.toId);
+    }
+
+    // ★追加(折りたたみ): 畳まれているノードは、以降のレイアウト計算では
+    // 子を持たない葉ノードとして扱う（隠れているのに裏でスペースを確保し続けるのを防ぐ）。
+    for (final cid in _collapsedNodeIds) {
+      childrenMap[cid] = [];
+    }
+
+    final roots = _nodes.where((n) => !hasParent.contains(n.id)).map((n) => n.id).toList();
+
+    List<int> ctxSplit(int nid, bool left) {
+      // ★変更(Defeater): 従来はContext等(_sideAttachedTypes)のみを横バケットに振り分けていたが、
+      // Defeaterも「親の横に付く」点は同じなので_allSideTypesで判定する。
+      final ctxChildren = (childrenMap[nid] ?? [])
+          .where((c) => _allSideTypes.contains(nodeMap[c]?.type))
+          .toList();
+      final half = ctxChildren.length ~/ 2;
+      return left ? ctxChildren.sublist(0, half) : ctxChildren.sublist(half);
+    }
+
+    // ★既知の制限: ここはノード自身のwidthのみで幅を確保しており、Defeaterの下に展開される
+    // 反論(Rebuttal)チェーンがDefeater本体より横に広い場合、その分は幅計算に反映されない。
+    double ctxExtraLeft(int nid) {
+      final leftCtxs = ctxSplit(nid, true);
+      if (leftCtxs.isEmpty) return 0.0;
+      return (leftCtxs.map((c) => nodeMap[c]!.width).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
+    }
+
+    double ctxExtraRight(int nid) {
+      final rightCtxs = ctxSplit(nid, false);
+      if (rightCtxs.isEmpty) return 0.0;
+      return (rightCtxs.map((c) => nodeMap[c]!.width).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
+    }
+
+    // ★変更(重なり修正): 以前は「サブツリー幅」という単一の値で持ち、base領域が中心から左右対称に
+    // 広がる前提で計算していた。しかし子が1つのとき（縦揃えのため）子の本体中心を親の中心に合わせると、
+    // 子の横付け要素が片側にしか無い場合にbase領域は左右非対称になる。この非対称を単一の幅で表せず、
+    // 「親が確保したつもりの右端」より実際の子サブツリーが右にはみ出し、
+    // 親自身の横付け要素（Defeaterとその反論チェーン）と衝突していた。
+    // そこで中心からの張り出しを左右別々(baseHalfLeft/baseHalfRight)に保持する。
+    final baseHalfLeft = <int, double>{};
+    final baseHalfRight = <int, double>{};
+
+    // サブツリー全体の幅（横付け要素も含む）。兄弟を横に並べる際の間隔計算に使う。
+    double subtreeWidth(int nid) =>
+        ctxExtraLeft(nid) + baseHalfLeft[nid]! + baseHalfRight[nid]! + ctxExtraRight(nid);
+
+    void computeExtents(int nid) {
+      if (baseHalfLeft.containsKey(nid)) return;
+      final nonCtx = (childrenMap[nid] ?? [])
+          .where((c) => !_allSideTypes.contains(nodeMap[c]?.type))
+          .toList();
+      final halfW = nodeMap[nid]!.width / 2;
+      double hl, hr;
+      if (nonCtx.isEmpty) {
+        hl = hr = halfW;
+      } else if (nonCtx.length == 1) {
+        // 子が1つ: 子の本体中心を親の中心に合わせるため、張り出しは子の張り出しをそのまま引き継ぐ
+        final c = nonCtx.first;
+        computeExtents(c);
+        final l = baseHalfLeft[c]! + ctxExtraLeft(c);
+        final r = baseHalfRight[c]! + ctxExtraRight(c);
+        hl = halfW > l ? halfW : l;
+        hr = halfW > r ? halfW : r;
+      } else {
+        // 子が複数: 横並びの総幅を中心に振り分けるので左右対称になる
+        for (final c in nonCtx) {
+          computeExtents(c);
+        }
+        final total = nonCtx.fold(0.0, (sum, c) => sum + subtreeWidth(c)) +
+            xGap * (nonCtx.length - 1);
+        hl = hr = halfW > total / 2 ? halfW : total / 2;
+      }
+      baseHalfLeft[nid] = hl;
+      baseHalfRight[nid] = hr;
+    }
+
+    for (final n in _nodes) {
+      computeExtents(n.id);
+    }
+
+    final placedNodes = <int>{};
+
+    const mapFunctionTypes = {GsnNodeType.lambda, GsnNodeType.application, GsnNodeType.x};
+
+    // ★追加(Defeater): placeChildrenBelow()とplace()は互いを呼び合う（相互再帰）ため、
+    // Dartのローカル関数は前方参照できない制約を回避するべく、先にplaceを変数として宣言しておく。
+    // ★変更(重なり修正): 第2引数は「サブツリーの左端」ではなく「ノード本体の中心X」。
+    late void Function(int nid, double centerX, int depth) place;
+
+    // ★追加(Defeater): 「中心線centerXの下に、通常の子ノード群を横並びの中央揃えで展開する」処理。
+    // 通常のGoal直下の子だけでなく、Defeater自身の下に伸びる反論(Rebuttal)チェーンにも使い回す。
+    void placeChildrenBelow(int parentNid, double centerX, int childDepth) {
+      final children = (childrenMap[parentNid] ?? [])
+          .where((c) => !_allSideTypes.contains(nodeMap[c]?.type))
+          .toList();
+      if (children.isEmpty) return;
+
+      // 子が1つだけの場合、その子の本体中心を親の中心にそのまま合わせる（Goal/Strategyの縦揃え）。
+      if (children.length == 1) {
+        final cid = children.first;
+        if (!placedNodes.contains(cid)) {
+          placedNodes.add(cid);
+          place(cid, centerX, childDepth);
+        }
+        return;
+      }
+
+      // 子が複数: サブツリー幅の合計を親の中心に振り分けて横並びにする
+      final childrenTotal = children.fold(0.0, (sum, c) => sum + subtreeWidth(c)) +
+          xGap * (children.length - 1);
+      double cursor = centerX - childrenTotal / 2;
+      for (final cid in children) {
+        if (!placedNodes.contains(cid)) {
+          placedNodes.add(cid);
+          // cursorはサブツリーの左端。そこから左側の横付け要素分と本体の左張り出し分を進めた位置が本体中心。
+          place(cid, cursor + ctxExtraLeft(cid) + baseHalfLeft[cid]!, childDepth);
+        }
+        cursor += subtreeWidth(cid) + xGap;
+      }
+    }
+
+    place = (int nid, double baseCenter, int depth) {
+      final node = nodeMap[nid]!;
+
+      // 接続点がbaseCenterに揃うようノード種別ごとにオフセットを調整
+      // Lambda: T字バー(left+width*0.125)、Application: 縦線(left+width*0.2)、その他: 中央
+      const double lambdaTBarRatio = 0.125;
+      const double appLineRatio = 0.2;
+      final double nodeOffsetX = node.type == GsnNodeType.lambda
+          ? node.width * lambdaTBarRatio
+          : node.type == GsnNodeType.application
+              ? node.width * appLineRatio
+              : node.width / 2;
+      node.position = Offset(baseCenter - nodeOffsetX, margin + depth * ySpacing);
+
+      // Map/Applicationノード：関数子を接続点直下、引数子を関数子の右に横並び
+      if (node.type == GsnNodeType.map || node.type == GsnNodeType.application) {
+        final allChildren = childrenMap[nid] ?? [];
+        final funcChildren = allChildren.where((c) => mapFunctionTypes.contains(nodeMap[c]?.type)).toList();
+        final argChildren = allChildren.where((c) => !mapFunctionTypes.contains(nodeMap[c]?.type)).toList();
+
+        final childY = margin + (depth + 1) * ySpacing;
+
+        // 接続点のX座標: Map/Application共にbaseCenter（各ノードはposition調整済み）
+        final double funcX = baseCenter;
+
+        for (final cid in funcChildren) {
+          if (!placedNodes.contains(cid)) {
+            placedNodes.add(cid);
+            final cn = nodeMap[cid]!;
+            final offsetX = cn.type == GsnNodeType.lambda
+                ? cn.width * lambdaTBarRatio
+                : cn.type == GsnNodeType.application
+                    ? cn.width * appLineRatio
+                    : cn.width / 2;
+            // ★変更(重なり修正): place()は中心X基準になったのでfuncXをそのまま渡す
+            // （直後にcn.positionを上書きするので、この呼び出しは主に子孫を配置するためのもの）
+            place(cid, funcX, depth + 1);
+            cn.position = Offset(funcX - offsetX, childY);
+          }
+        }
+
+        // 引数子を関数子の右に横並び（実際の右端から開始）
+        double argX;
+        if (funcChildren.isEmpty) {
+          argX = funcX + xGap;
+        } else {
+          final fcn = nodeMap[funcChildren.first]!;
+          final fOffsetX = fcn.type == GsnNodeType.lambda
+              ? fcn.width * lambdaTBarRatio
+              : fcn.type == GsnNodeType.application
+                  ? fcn.width * appLineRatio
+                  : fcn.width / 2;
+          argX = (funcX - fOffsetX) + fcn.width + xGap;
+        }
+        for (final cid in argChildren) {
+          if (!placedNodes.contains(cid)) {
+            placedNodes.add(cid);
+            final cn = nodeMap[cid]!;
+            cn.position = Offset(argX, childY);
+            argX += cn.width + xGap;
+          }
+        }
+        return;
+      }
+
+      // ★変更(Defeater): 直書きだったループをplaceChildrenBelow()呼び出しに置き換え（挙動は従来と同一）
+      placeChildrenBelow(nid, baseCenter, depth + 1);
+
+      // ★変更(重なり修正): 横付け要素は「ノード自身の箱」ではなく「本体+その子孫が実際に占める領域」の
+      // 外側に置く。左右の張り出しは非対称になりうるので、baseHalfLeft/baseHalfRightを使う。
+      final contentLeftEdge = baseCenter - baseHalfLeft[nid]!;
+      final contentRightEdge = baseCenter + baseHalfRight[nid]!;
+
+      final leftCtxs = ctxSplit(nid, true);
+      final rightCtxs = ctxSplit(nid, false);
+      for (int i = 0; i < leftCtxs.length; i++) {
+        final cid = leftCtxs[i];
+        final cn = nodeMap[cid]!;
+        cn.position = Offset(contentLeftEdge - ctxSideGap - cn.width, node.position.dy + i * (cn.height + 10));
+        // ★追加(Defeater): Defeater自身は従来のContextと同じ位置に置きつつ、
+        // その真下に反論(Rebuttal)チェーンがあれば中央揃えで展開する。
+        if (_expandableSideTypes.contains(cn.type)) {
+          placeChildrenBelow(cid, cn.position.dx + cn.width / 2, depth + 1);
+        }
+      }
+      for (int i = 0; i < rightCtxs.length; i++) {
+        final cid = rightCtxs[i];
+        final cn = nodeMap[cid]!;
+        cn.position = Offset(contentRightEdge + ctxSideGap, node.position.dy + i * (cn.height + 10));
+        // ★追加(Defeater): 左側と同様、右側に置かれたDefeaterにも反論チェーンを展開する。
+        if (_expandableSideTypes.contains(cn.type)) {
+          placeChildrenBelow(cid, cn.position.dx + cn.width / 2, depth + 1);
+        }
+      }
+    };
+
+    // GoalノードのルートをPGSNノードより先に配置する
+    const gsnRootTypes = {GsnNodeType.goal};
+    final sortedRoots = [
+      ...roots.where((id) => gsnRootTypes.contains(nodeMap[id]!.type)),
+      ...roots.where((id) => !gsnRootTypes.contains(nodeMap[id]!.type)),
+    ];
+
+    void placeSafe(int nid, double centerX, int depth) {
+      if (placedNodes.contains(nid)) return;
+      placedNodes.add(nid);
+      place(nid, centerX, depth);
+    }
+
+    // ★変更(重なり修正): cursorは各ルートのサブツリー左端。place()には本体中心を渡す。
+    double cursor = margin;
+    for (final rid in sortedRoots) {
+      placeSafe(rid, cursor + ctxExtraLeft(rid) + baseHalfLeft[rid]!, 0);
+      cursor += subtreeWidth(rid) + xGap * 2;
+    }
+
+    // 負座標補正
+    if (_nodes.isNotEmpty) {
+      final minX = _nodes.map((n) => n.position.dx).reduce((a, b) => a < b ? a : b);
+      if (minX < margin) {
+        final shift = margin - minX;
+        for (final n in _nodes) {
+          n.position = Offset(n.position.dx + shift, n.position.dy);
+        }
+      }
+    }
+
+    setState(() {});
+    _saveToLocalStorage();
+  }
+
   void _addNode(GsnNodeType type, Offset position) {
     _saveToHistory();
     setState(() {
@@ -520,14 +948,26 @@ class _GsnEditorState extends State<GsnEditor> {
     setState(() => _deleteMode = !_deleteMode);
   }
 
+  // ★追加(接続キャンセル): 接続待ちを解除する。Esc・右クリック・空白クリックから呼ぶ。
+  void _cancelConnecting() {
+    if (_connecting == null) return;
+    setState(() => _connecting = null);
+    _connectPreviewEnd.value = null;
+  }
+
   // 2タップでエッジ接続: 1回目でfrom（青くなる）を選択、2回目でtoを確定してエッジ追加。
   // 同じノードを2回タップするとキャンセル。
+  // 接続待ちの解除はここ（同じノードを再タップ）のほか、Esc・右クリック・空白クリックでも行える。
   void _handleTapNode(GsnNode node) {
     if (_deleteMode) {
       _confirmDeleteNode(node);
     } else {
       if (_connecting == null) {
         setState(() => _connecting = node.id);
+        // ★追加(接続プレビュー): 最初のホバーを待たずに線が出るよう、押した位置を初期値にする
+        // （_lastTapDownLocalPos はノードローカル座標なので、位置を足してシーン座標に直す）。
+        _connectPreviewEnd.value = node.position +
+            (_lastTapDownLocalPos ?? Offset(node.width / 2, node.height / 2));
       } else if (_connecting != node.id) {
         _saveToHistory();
         setState(() {
@@ -672,7 +1112,21 @@ class _GsnEditorState extends State<GsnEditor> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // ★追加(接続キャンセル): Escキーで接続待ちを解除する。
+    // ラベル編集などのダイアログは別ルートなので、開いている間はそちらがキーを受け取る
+    // （Escでダイアログが閉じる従来の挙動は変わらない）。
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.escape &&
+            _connecting != null) {
+          _cancelConnecting();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('GSNエディタ'),
         actions: [
@@ -729,6 +1183,10 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: _exportJson,
               icon: const Icon(Icons.save_alt),
               tooltip: 'JSON保存（ローカル）'),
+          IconButton(
+              onPressed: _nodes.isEmpty ? null : _exportPdf,
+              icon: const Icon(Icons.picture_as_pdf),
+              tooltip: 'PDF保存（現在の図）'),
            IconButton(
               onPressed: _evaluateGsn,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
@@ -768,6 +1226,11 @@ class _GsnEditorState extends State<GsnEditor> {
             onPressed: _uploadCsv,
           ),
           IconButton(
+            icon: const Icon(Icons.account_tree),
+            tooltip: '自動レイアウト',
+            onPressed: _nodes.isEmpty ? null : _autoLayout,
+          ),
+          IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: '図をすべて削除（リセット）',
             onPressed: _confirmClearDiagram,
@@ -789,9 +1252,20 @@ class _GsnEditorState extends State<GsnEditor> {
                   if (_selectionMode) {
                     // 選択解除はonTapで行う（onTapDownはドラッグ開始時にも発火するため）
                   } else if (_deleteMode) {
+                  } else if (_hitTestAnyNode(sceneP)) {
+                    // ★変更(エッジ接続): ノード上のタップはノード側のGestureDetectorに任せ、
+                    // ここでは何もしない。以前はこの位置で無条件に _connecting = null して
+                    // いたが、キャンバス側のonTapDownは押下が kPressTimeout(100ms) を超えると
+                    // ジェスチャーアリーナの決着を待たずに発火する。そのため2ノード目を
+                    // ゆっくり押すと、ノードのonTapが走る前に接続待ち状態が消え、エッジが
+                    // 張られずにそのノードが新しい始点になってしまっていた
+                    // （素早くクリックしたときだけ繋がる、という症状）。
                   } else if (_connecting != null) {
-                    setState(() => _connecting = null);
+                    // 空白部分のタップは接続のキャンセル
+                    _cancelConnecting();
                   } else {
+                    // ★変更(誤削除の防止): ノード上のタップではエッジ削除の判定をしない。
+                    // 詳細は _hitTestAnyNode() のコメントを参照。
                     for (var edge in List.from(_edges)) {
                       if (_hitTestEdge(sceneP, edge)) {
                         _confirmDeleteEdge(edge);
@@ -807,6 +1281,10 @@ class _GsnEditorState extends State<GsnEditor> {
                     _clearSelection();
                   }
                 },
+                // ★追加(接続キャンセル): 右クリックで接続待ちを解除する。
+                // ノード側のGestureDetectorには副ボタンのハンドラを置いていないので、
+                // ノードの上で右クリックしてもこちらが拾う（どちらでもキャンセルしたいため）。
+                onSecondaryTap: _cancelConnecting,
                 onPanStart: !_selectionMode ? null : (d) {
                   setState(() {
                     _selectionRectStart = _tc.toScene(d.localPosition);
@@ -842,7 +1320,25 @@ class _GsnEditorState extends State<GsnEditor> {
                   scaleEnabled: true,
                   constrained: false,
                   boundaryMargin: const EdgeInsets.all(2000),
-                  child: SizedBox(
+                  child: Builder(builder: (context) {
+                    // ★追加(折りたたみ): 畳まれたノードの子孫を非表示にする
+                    final hiddenIds = _computeHiddenNodeIds();
+                    final visibleNodes =
+                        _nodes.where((n) => !hiddenIds.contains(n.id)).toList();
+                    final visibleEdges = _edges
+                        .where((e) =>
+                            !hiddenIds.contains(e.fromId) &&
+                            !hiddenIds.contains(e.toId))
+                        .toList();
+                    return MouseRegion(
+                      // ★追加(接続プレビュー): 接続待ちのあいだ、カーソルを追う線を描くために
+                      // ホバー座標を拾う。InteractiveViewerの内側に置いているので
+                      // localPosition はすでにシーン座標（図そのものの座標系）になっている。
+                      onHover: (e) {
+                        if (_connecting == null) return;
+                        _connectPreviewEnd.value = e.localPosition;
+                      },
+                      child: SizedBox(
                     width: _worldSize.width,
                     height: _worldSize.height,
                     child: Stack(
@@ -856,8 +1352,22 @@ class _GsnEditorState extends State<GsnEditor> {
                           ),
                         Positioned.fill(
                           child: CustomPaint(
-                            painter: GsnEdgePainter(_nodes, _edges,
+                            painter: GsnEdgePainter(_nodes, visibleEdges,
                                 connectingId: _connecting),
+                          ),
+                        ),
+                        // ★追加(接続プレビュー): 始点ノードからカーソルへ破線を描く層。
+                        // 「次にクリックしたノードが終点になる」ことを見て分かるようにする。
+                        // IgnorePointerで当たり判定には一切影響させない。
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: ConnectingPreviewPainter(
+                                nodes: visibleNodes,
+                                fromId: _connecting,
+                                cursor: _connectPreviewEnd,
+                              ),
+                            ),
                           ),
                         ),
                         if (_selectionMode &&
@@ -879,14 +1389,33 @@ class _GsnEditorState extends State<GsnEditor> {
                               ),
                             ),
                           ),
-                        ..._nodes.map((node) {
+                        ...visibleNodes.map((node) {
                           final isConnecting = _connecting == node.id;
                           return Positioned(
                             left: node.position.dx,
                             top: node.position.dy,
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
+                              // ★変更(折りたたみ): 折りたたみバッジは独立したGestureDetectorとしては
+                              // 実装しない（このノード本体のGestureDetectorに onPanStart/onPanUpdate が
+                              // 同居しており、入れ子のGestureDetectorではジェスチャーアリーナで
+                              // タップがpan側に取られてバッジのタップが拾えなかったため）。
+                              // onTapのシグネチャ自体は変えず、onTapDownで座標だけ先に拾っておく。
+                              onTapDown: (details) =>
+                                  _lastTapDownLocalPos = details.localPosition,
                               onTap: () {
+                                final pos = _lastTapDownLocalPos;
+                                final hasChildren =
+                                    _edges.any((e) => e.fromId == node.id);
+                                if (pos != null &&
+                                    hasChildren &&
+                                    pos.dx >= 0 &&
+                                    pos.dx <= _collapseBadgeHitArea &&
+                                    pos.dy >= 0 &&
+                                    pos.dy <= _collapseBadgeHitArea) {
+                                  _toggleCollapse(node.id);
+                                  return;
+                                }
                                 if (_selectionMode) {
                                   setState(() {
                                     if (_selectedNodeIds.contains(node.id)) {
@@ -956,7 +1485,52 @@ class _GsnEditorState extends State<GsnEditor> {
                                         ),
                                       ),
                                     ),
-                                  _buildGsnShapeWidget(node),
+                                  _buildGsnShapeWidget(
+                                    node,
+                                    // ★追加(Dialectic): DefeaterがdefeatedかinDoubtかを表示に反映する
+                                    defeaterBacked:
+                                        node.type == GsnNodeType.defeater
+                                            ? _isDefeaterBacked(
+                                                node, _nodes, _edges)
+                                            : false,
+                                  ),
+                                  // ★追加(折りたたみ): 子を持つノードにだけ、折りたたみ用のバッジを表示する。
+                                  // このバッジ自体はIgnorePointerにして独自のヒットテストを持たせない
+                                  // （タップ判定はノード本体のGestureDetector側のonTapで座標判定している。
+                                  // 理由は上のonTapDown/onTap側のコメントを参照）。
+                                  // 位置とサイズは_collapseBadge*定数で判定領域と揃える。
+                                  if (_edges.any((e) => e.fromId == node.id))
+                                    Positioned(
+                                      left: _collapseBadgeInset,
+                                      top: _collapseBadgeInset,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          width: _collapseBadgeSize,
+                                          height: _collapseBadgeSize,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Colors.white,
+                                            border: Border.all(
+                                                color: Colors.black54),
+                                          ),
+                                          alignment: Alignment.center,
+                                          child:
+                                              _collapsedNodeIds.contains(node.id)
+                                                  ? Text(
+                                                      '+${_countDescendants(node.id)}',
+                                                      style: const TextStyle(
+                                                          fontSize: 9,
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                          color:
+                                                              Colors.black87),
+                                                    )
+                                                  : const Icon(Icons.remove,
+                                                      size: 12,
+                                                      color: Colors.black87),
+                                        ),
+                                      ),
+                                    ),
                                   if (_deleteMode)
                                     Positioned(
                                       right: -8,
@@ -994,7 +1568,9 @@ class _GsnEditorState extends State<GsnEditor> {
                         }),
                       ],
                     ),
-                  ),
+                    ),
+                    );
+                  }),
                 ),
               );
             },
@@ -1015,7 +1591,26 @@ class _GsnEditorState extends State<GsnEditor> {
         ),
         ],
       ),
+      ),
     );
+  }
+
+  // ★追加(誤削除の防止): 指定座標がいずれかの「表示中の」ノードの矩形内にあるかを判定する。
+  // キャンバス側のonTapDownはジェスチャーアリーナの決着前に発火するため、ノード上をタップしても
+  // 必ず一度は発火してしまう（onTapと違い「子が勝つから来ない」が成立しない）。
+  // そのためエッジ削除の判定前にこれで弾き、ノード上のタップ（折りたたみバッジ含む）が
+  // 誤ってエッジ削除を引き起こさないようにする。
+  bool _hitTestAnyNode(Offset p) {
+    final hiddenIds = _computeHiddenNodeIds();
+    for (final n in _nodes) {
+      if (hiddenIds.contains(n.id)) continue;
+      final rect =
+          Rect.fromLTWH(n.position.dx, n.position.dy, n.width, n.height);
+      // 折りたたみバッジやリサイズハンドルはノード矩形の外側にもわずかにはみ出すため、
+      // 少し広げた範囲を「ノード上」とみなす。
+      if (rect.inflate(10).contains(p)) return true;
+    }
+    return false;
   }
 
   // エッジをクリックしたかを判定する。エッジはfrom下辺中央→to上辺中央の直線として近似し、10px以内をヒットとする。
@@ -1089,7 +1684,7 @@ class _GsnEditorState extends State<GsnEditor> {
           final bytes = reader.result as List<int>;
           final request = http.MultipartRequest(
             'POST',
-            Uri.parse('http://localhost:5000/upload'),
+            Uri.parse('https://pgsn-api.onrender.com/upload'),
           );
           request.files.add(http.MultipartFile.fromBytes(
             'file',
@@ -1121,7 +1716,7 @@ class _GsnEditorState extends State<GsnEditor> {
 
   Future<void> _addFileListNode(Offset position) async {
     try {
-      final response = await http.get(Uri.parse('http://localhost:5000/files'));
+      final response = await http.get(Uri.parse('https://pgsn-api.onrender.com/files'));
       final files = (jsonDecode(response.body)['files'] as List).cast<String>();
 
       if (!mounted) return;
@@ -1190,6 +1785,29 @@ class _GsnEditorState extends State<GsnEditor> {
     html.Url.revokeObjectUrl(url);
   }
 
+  // 編集中の図（評価前）をPDFに書き出す。
+  // 折りたたみ中のノードは画面に出ていないため、出力からも除く（見えている図＝出力）。
+  Future<void> _exportPdf() async {
+    final hiddenIds = _computeHiddenNodeIds();
+    final visibleNodes =
+        _nodes.where((n) => !hiddenIds.contains(n.id)).toList();
+    final visibleEdges = _edges
+        .where((e) =>
+            !hiddenIds.contains(e.fromId) && !hiddenIds.contains(e.toId))
+        .toList();
+
+    try {
+      await _exportDiagramPdf(
+        nodes: visibleNodes,
+        edges: visibleEdges,
+        edgePainter: GsnEdgePainter(visibleNodes, visibleEdges),
+        fileName: 'gsn.pdf',
+      );
+    } catch (e) {
+      if (mounted) _showPdfErrorDialog(context, e);
+    }
+  }
+
   // ---- Google Drive 連携 ----
 
   /// サインイン／サインアウトを切り替える
@@ -1236,20 +1854,13 @@ class _GsnEditorState extends State<GsnEditor> {
       return;
     }
 
-    // フォルダ一覧を取得
-    List<DriveItem> folders = [];
-    try {
-      folders = await _driveService.listFolders();
-    } catch (_) {}
-
-    if (!mounted) return;
-
-    // 保存ダイアログを表示
-    final result = await showDialog<_DriveSaveParams>(
+    // 保存先はマイドライブ直下のアプリ専用フォルダに固定しているため、
+    // フォルダ選択は無くしてファイル名だけを聞く。
+    final fileName = await showDialog<String>(
       context: context,
-      builder: (ctx) => _DriveSaveDialog(folders: folders),
+      builder: (ctx) => const _DriveSaveDialog(),
     );
-    if (result == null) return; // キャンセル
+    if (fileName == null) return; // キャンセル
 
     try {
       final data = {
@@ -1258,14 +1869,13 @@ class _GsnEditorState extends State<GsnEditor> {
         'nodeCounter': _nodeCounter,
       };
       final jsonString = const JsonEncoder.withIndent('  ').convert(data);
-      await _driveService.saveFile(
-        jsonString,
-        result.fileName,
-        folderId: result.folderId,
-      );
+      await _driveService.saveFile(jsonString, fileName);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('「${result.fileName}.json」を Google ドライブに保存しました。')),
+          SnackBar(
+            content: Text('「$fileName.json」を Google ドライブの'
+                '「${GoogleDriveService.appFolderName}」フォルダに保存しました。'),
+          ),
         );
       }
     } catch (e) {
@@ -1286,7 +1896,7 @@ class _GsnEditorState extends State<GsnEditor> {
       return;
     }
 
-    // ファイル一覧を取得（マイドライブ全体から検索）
+    // ファイル一覧を取得（アプリ専用フォルダの中だけを検索）
     List<DriveItem> files = [];
     try {
       files = await _driveService.listJsonFiles();
@@ -1303,7 +1913,10 @@ class _GsnEditorState extends State<GsnEditor> {
 
     if (files.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Google ドライブに JSON ファイルが見つかりませんでした。')),
+        SnackBar(
+          content: Text('Google ドライブの「${GoogleDriveService.appFolderName}」'
+              'フォルダに保存済みの図がありません。'),
+        ),
       );
       return;
     }
@@ -1343,16 +1956,11 @@ class _GsnEditorState extends State<GsnEditor> {
 }
 
 // ---- Drive 保存ダイアログ ----
-
-class _DriveSaveParams {
-  final String fileName;
-  final String folderId;
-  const _DriveSaveParams({required this.fileName, required this.folderId});
-}
+// 保存先はアプリ専用フォルダ固定なので、聞くのはファイル名だけ。
+// Navigator.pop にはファイル名（拡張子なし）をそのまま返す。
 
 class _DriveSaveDialog extends StatefulWidget {
-  final List<DriveItem> folders;
-  const _DriveSaveDialog({required this.folders});
+  const _DriveSaveDialog();
 
   @override
   State<_DriveSaveDialog> createState() => _DriveSaveDialogState();
@@ -1360,7 +1968,6 @@ class _DriveSaveDialog extends StatefulWidget {
 
 class _DriveSaveDialogState extends State<_DriveSaveDialog> {
   final _nameController = TextEditingController(text: 'gsn');
-  String _selectedFolderId = 'root';
 
   @override
   void dispose() {
@@ -1398,30 +2005,18 @@ class _DriveSaveDialogState extends State<_DriveSaveDialog> {
               ],
             ),
             const SizedBox(height: 16),
-            const Text('保存先フォルダ'),
-            const SizedBox(height: 4),
-            DropdownButtonFormField<String>(
-              value: _selectedFolderId,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              items: [
-                const DropdownMenuItem(
-                  value: 'root',
-                  child: Text('マイドライブ（ルート）'),
+            Row(
+              children: [
+                const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'マイドライブの「${GoogleDriveService.appFolderName}」フォルダに'
+                    '保存されます（無ければ自動で作成）。',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
                 ),
-                ...widget.folders.map((f) => DropdownMenuItem(
-                      value: f.id,
-                      child: Text(f.name),
-                    )),
               ],
-              onChanged: (v) {
-                if (v == null) return;
-                setState(() {
-                  _selectedFolderId = v;
-                });
-              },
             ),
           ],
         ),
@@ -1435,13 +2030,7 @@ class _DriveSaveDialogState extends State<_DriveSaveDialog> {
           onPressed: () {
             final name = _nameController.text.trim();
             if (name.isEmpty) return;
-            Navigator.pop(
-              context,
-              _DriveSaveParams(
-                fileName: name,
-                folderId: _selectedFolderId,
-              ),
-            );
+            Navigator.pop(context, name);
           },
           child: const Text('保存'),
         ),
@@ -1493,7 +2082,10 @@ class _DriveLoadDialog extends StatelessWidget {
 
 // ノードタイプ別の形状ウィジェットを返す。
 // Application/Mapはキャンバス上ではラベルを非表示にする（図形の形だけで型が識別できるため）。
-Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
+// ★追加(Dialectic): defeaterBackedは呼び出し側(_edges等を参照できる箇所)で_isDefeaterBacked()を使って
+// 計算し渡す。パレット表示などedges情報が無い場合は既定値false(inDoubtの見た目)のままにする。
+Widget _buildGsnShapeWidget(GsnNode node,
+    {bool isPalette = false, bool defeaterBacked = false}) {
   final labelStyle = TextStyle(
     fontSize: isPalette ? 10 : 12,
     fontWeight: FontWeight.bold,
@@ -1587,6 +2179,15 @@ Widget _buildGsnShapeWidget(GsnNode node, {bool isPalette = false}) {
     case GsnNodeType.context:
       return buildPainter(RoundedRectPainter(Colors.purple.shade100, 12));
 
+    case GsnNodeType.assumption:
+      return buildPainter(AnnotatedOvalPainter(Colors.yellow.shade100, 'A'));
+
+    case GsnNodeType.justification:
+      return buildPainter(AnnotatedOvalPainter(Colors.teal.shade100, 'J'));
+
+    case GsnNodeType.defeater: // ★変更(Dialectic): defeaterBackedでdefeated/inDoubtの見た目を切り替える
+      return buildPainter(DefeaterPainter(backed: defeaterBacked));
+
     case GsnNodeType.x:
       return buildPainter(XPainter());
 
@@ -1643,6 +2244,9 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.context,
         GsnNodeType.evidence,
         GsnNodeType.undeveloped,
+        GsnNodeType.assumption,
+        GsnNodeType.justification,
+        GsnNodeType.defeater, // ★追加(Defeater)
       ],
     ),
     _PaletteGroup(
@@ -1834,6 +2438,85 @@ class GridPainter extends CustomPainter {
       oldDelegate.gridSize != gridSize;
 }
 
+// ★追加(接続プレビュー): 接続待ちのあいだ、始点ノードからカーソルまで破線を描く。
+// 「いま接続待ちで、次にクリックしたノードが終点になる」ことを見て分かるようにするための
+// 表示だけのもので、実際のエッジではないため保存も評価もされない。
+// repaintにcursorを渡しているので、マウス移動では図全体をrebuildせずこの層だけ塗り直す。
+class ConnectingPreviewPainter extends CustomPainter {
+  final List<GsnNode> nodes;
+  final int? fromId;
+  final ValueNotifier<Offset?> cursor;
+
+  ConnectingPreviewPainter({
+    required this.nodes,
+    required this.fromId,
+    required this.cursor,
+  }) : super(repaint: cursor);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final id = fromId;
+    final end = cursor.value;
+    if (id == null || end == null) return;
+
+    GsnNode? from;
+    for (final n in nodes) {
+      if (n.id == id) {
+        from = n;
+        break;
+      }
+    }
+    if (from == null) return;
+
+    final rect = Rect.fromLTWH(
+        from.position.dx, from.position.dy, from.width, from.height);
+    // カーソルが始点ノードの中にあるあいだは線を出さない（潰れた線になるだけのため）。
+    if (rect.contains(end)) return;
+
+    final start = _edgePointToward(rect, end);
+    final paint = Paint()
+      ..color = Colors.blue.withOpacity(0.8)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    _drawDashedPath(
+      canvas,
+      Path()
+        ..moveTo(start.dx, start.dy)
+        ..lineTo(end.dx, end.dy),
+      paint,
+    );
+    _drawArrowHead(canvas, start, end, paint);
+  }
+
+  // 矩形の中心からtowardへ伸ばした半直線が、矩形の枠と交わる点を返す。
+  static Offset _edgePointToward(Rect rect, Offset toward) {
+    final center = rect.center;
+    final d = toward - center;
+    if (d.dx == 0 && d.dy == 0) return center;
+    // 各軸で枠に届くまでの倍率を出し、小さい方が実際にぶつかる辺になる。
+    final tx = d.dx == 0 ? double.infinity : (rect.width / 2) / d.dx.abs();
+    final ty = d.dy == 0 ? double.infinity : (rect.height / 2) / d.dy.abs();
+    return center + d * min(tx, ty);
+  }
+
+  // 終点側に矢尻を描き、どちら向きに繋がるのか（始点→終点）を分かるようにする。
+  static void _drawArrowHead(
+      Canvas canvas, Offset start, Offset end, Paint paint) {
+    const double len = 12;
+    const double spread = 0.45; // 開き角(ラジアン)
+    final angle = atan2(end.dy - start.dy, end.dx - start.dx);
+    canvas.drawLine(
+        end, end - Offset(cos(angle - spread), sin(angle - spread)) * len, paint);
+    canvas.drawLine(
+        end, end - Offset(cos(angle + spread), sin(angle + spread)) * len, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant ConnectingPreviewPainter old) =>
+      old.fromId != fromId || old.nodes != nodes || old.cursor != cursor;
+}
+
 class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
@@ -1979,11 +2662,16 @@ class GsnEdgePainter extends CustomPainter {
       }
 
       final isSelected = (connectingId == fromNode.id || connectingId == toNode.id);
+      // ★追加(Dialectic): "challenges"関係（GSN v3のDialectic拡張）は他の関係と区別できるよう
+      // 破線・赤系の色で描画する。選択中/削除モードの色は従来通り優先する。
+      final isChallenge = _isChallengesEdge(toNode);
 
       final paint = Paint()
         ..color = isRemovalMode
             ? Colors.red.withOpacity(0.5)
-            : (isSelected ? Colors.blue.shade800 : Colors.black)
+            : (isSelected
+                ? Colors.blue.shade800
+                : (isChallenge ? Colors.red.shade700 : Colors.black))
         ..strokeWidth = isSelected ? 3 : 2;
 
 Offset startPoint = Offset.zero;
@@ -2130,25 +2818,35 @@ Offset? _bend2;
 
 
 
-          // Context / Assumption は横からエッジを繋ぐ
+          // Context / Assumption / Justification は横からエッジを繋ぐ
           // Contextがfromノードより右にあれば右辺→左辺、左なら左辺→右辺
-          final toIsContext = toNode.type == GsnNodeType.context;
-          final fromIsContext = fromNode.type == GsnNodeType.context;
+          final toIsPlainSide = _sideAttachedTypes.contains(toNode.type);
+          final fromIsPlainSide = _sideAttachedTypes.contains(fromNode.type);
 
-          if (toIsContext || fromIsContext) {
-            // どちらがContextかを判断して、横方向に接続する
-            final contextRect  = toIsContext ? toRect   : fromRect;
-            final goalRect     = toIsContext ? fromRect : toRect;
+          // ★追加(Defeater): DefeaterはGoal/Strategyに「アタッチされる側(=to)」のときだけ横方向に繋ぐ。
+          // Defeaterから自分の反論(Rebuttal)チェーンの子へ向かうエッジ（Defeaterがfrom側）は
+          // ここでは対象にせず、下のelse節（通常の縦方向接続）に流す。
+          // これによりDefeater自身は横付け、その下の子は普通の親子接続、という描き分けができる。
+          final toIsDefeaterAttach = toNode.type == GsnNodeType.defeater;
 
-            // ContextがGoalより右にあるか左にあるかで接続辺を決める
+          final isHorizontalSideEdge = toIsPlainSide || fromIsPlainSide || toIsDefeaterAttach;
+          // sideIsTo: 「横に付く側」がto/fromのどちらか（Context等の逆順クリックにも対応するため据え置き）
+          final sideIsTo = toIsPlainSide || toIsDefeaterAttach;
+
+          if (isHorizontalSideEdge) {
+            // どちらが横付け要素かを判断して、横方向に接続する
+            final contextRect  = sideIsTo ? toRect   : fromRect;
+            final goalRect     = sideIsTo ? fromRect : toRect;
+
+            // 横付け要素がGoalより右にあるか左にあるかで接続辺を決める
             if (contextRect.center.dx >= goalRect.center.dx) {
-              // Contextが右側 → Goalの右辺 → Contextの左辺
-              startPoint = toIsContext ? goalRect.centerRight    : contextRect.centerRight;
-              endPoint   = toIsContext ? contextRect.centerLeft  : goalRect.centerLeft;
+              // 右側 → Goalの右辺 → 横付け要素の左辺
+              startPoint = sideIsTo ? goalRect.centerRight    : contextRect.centerRight;
+              endPoint   = sideIsTo ? contextRect.centerLeft  : goalRect.centerLeft;
             } else {
-              // Contextが左側 → Goalの左辺 → Contextの右辺
-              startPoint = toIsContext ? goalRect.centerLeft     : contextRect.centerLeft;
-              endPoint   = toIsContext ? contextRect.centerRight : goalRect.centerRight;
+              // 左側 → Goalの左辺 → 横付け要素の右辺
+              startPoint = sideIsTo ? goalRect.centerLeft     : contextRect.centerLeft;
+              endPoint   = sideIsTo ? contextRect.centerRight : goalRect.centerRight;
             }
           } else {
             // スタート地点：fromNodeの真ん中下
@@ -2161,6 +2859,7 @@ Offset? _bend2;
 
 
       // 線を描画（Map引数はL字折れ線、それ以外は直線）
+      // ★追加(Dialectic): challengesエッジは破線で描画する
       if (_bend1 != null) {
         // L字折れ線: startPoint → bend1 → (bend2 →) endPoint
         final path = Path()
@@ -2168,7 +2867,16 @@ Offset? _bend2;
           ..lineTo(_bend1!.dx, _bend1!.dy);
         if (_bend2 != null) path.lineTo(_bend2!.dx, _bend2!.dy);
         path.lineTo(endPoint.dx, endPoint.dy);
-        canvas.drawPath(path, paint..style = PaintingStyle.stroke);
+        if (isChallenge) {
+          _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
+        } else {
+          canvas.drawPath(path, paint..style = PaintingStyle.stroke);
+        }
+      } else if (isChallenge) {
+        final path = Path()
+          ..moveTo(startPoint.dx, startPoint.dy)
+          ..lineTo(endPoint.dx, endPoint.dy);
+        _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
       } else {
         canvas.drawLine(startPoint, endPoint, paint);
       }
@@ -2301,6 +3009,117 @@ class EvidencePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// Assumption('A')・Justification('J')共用のPainter。
+// GSN標準では楕円に右下の丸バッジで注記を付けて区別する。
+class AnnotatedOvalPainter extends CustomPainter {
+  final Color color;
+  final String letter;
+  AnnotatedOvalPainter(this.color, this.letter);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fillPaint = Paint()..color = color;
+    final borderPaint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    canvas.drawOval(rect, fillPaint);
+    canvas.drawOval(rect, borderPaint);
+
+    const badgeRadius = 9.0;
+    final badgeCenter =
+        Offset(size.width - badgeRadius - 2, size.height - badgeRadius - 2);
+    canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.white);
+    canvas.drawCircle(badgeCenter, badgeRadius, borderPaint);
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: letter,
+        style: const TextStyle(
+            color: Colors.black, fontSize: 11, fontWeight: FontWeight.bold),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      badgeCenter - Offset(textPainter.width / 2, textPainter.height / 2),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) =>
+      oldDelegate is! AnnotatedOvalPainter ||
+      oldDelegate.color != color ||
+      oldDelegate.letter != letter;
+}
+
+// ★追加(Defeater): Confidence Argument対応。Goal/Strategyへの疑義(反論)を示す六角形。
+// 「警告・要注意」を表す色（赤系）にして、支持側の要素（Evidence/Assumption等）と一目で区別できるようにする。
+// ★変更(Dialectic): GSN v3のDialectic拡張が言う2つの状態を見た目で区別する。
+// backed=true  → defeated（Evidence等の裏付けを伴う主張による疑義。無効化が確定）: 実線・濃い赤・「!」
+// backed=false → inDoubt   （Undeveloped=未対応な主張による疑義。要検討）: 破線・薄い赤・「?」
+class DefeaterPainter extends CustomPainter {
+  final bool backed;
+  DefeaterPainter({this.backed = false});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final fillPaint = Paint()
+      ..color = backed ? Colors.red.shade200 : Colors.red.shade50;
+    final borderPaint = Paint()
+      ..color = Colors.red.shade900
+      ..strokeWidth = backed ? 2.0 : 1.2
+      ..style = PaintingStyle.stroke;
+
+    final w = size.width;
+    final h = size.height;
+    final cut = w * 0.18; // 六角形の斜め辺の切り欠き幅
+
+    final path = Path()
+      ..moveTo(cut, 0)
+      ..lineTo(w - cut, 0)
+      ..lineTo(w, h / 2)
+      ..lineTo(w - cut, h)
+      ..lineTo(cut, h)
+      ..lineTo(0, h / 2)
+      ..close();
+
+    canvas.drawPath(path, fillPaint);
+    if (backed) {
+      canvas.drawPath(path, borderPaint);
+    } else {
+      _drawDashedPath(canvas, path, borderPaint);
+    }
+
+    // 状態バッジ（右下の丸に "!" / "?"）
+    const badgeRadius = 9.0;
+    final badgeCenter = Offset(w - badgeRadius - 2, h - badgeRadius - 2);
+    canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = Colors.white);
+    canvas.drawCircle(badgeCenter, badgeRadius, borderPaint..style = PaintingStyle.stroke);
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: backed ? '!' : '?',
+        style: TextStyle(
+            color: Colors.red.shade900,
+            fontSize: 12,
+            fontWeight: FontWeight.bold),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      badgeCenter - Offset(textPainter.width / 2, textPainter.height / 2),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) =>
+      oldDelegate is! DefeaterPainter || oldDelegate.backed != backed;
 }
 
 class UndevelopedPainter extends CustomPainter {
@@ -2704,6 +3523,25 @@ class GsnResultViewer extends StatelessWidget {
             title: const Text("評価結果ビューア"),
             automaticallyImplyLeading: false,
             actions: [
+              // 評価後の図もPDFに保存できるようにする（画面と同じPainterで出力する）
+              IconButton(
+                icon: const Icon(Icons.picture_as_pdf),
+                tooltip: 'PDF保存（評価結果）',
+                onPressed: nodes.isEmpty
+                    ? null
+                    : () async {
+                        try {
+                          await _exportDiagramPdf(
+                            nodes: nodes,
+                            edges: edges,
+                            edgePainter: _SimpleEdgePainter(nodes, edges),
+                            fileName: 'gsn_evaluated.pdf',
+                          );
+                        } catch (e) {
+                          if (context.mounted) _showPdfErrorDialog(context, e);
+                        }
+                      },
+              ),
               IconButton(
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.of(context).pop(),
@@ -2735,7 +3573,13 @@ class GsnResultViewer extends StatelessWidget {
                         // ★修正点: エディタ本体と同じ描画関数を再利用する
                         // これにより、Strategyは平行四辺形、Evidenceは楕円など、
                         // エディタと全く同じ見た目で表示されます。
-                        child: _buildGsnShapeWidget(node),
+                        child: _buildGsnShapeWidget(
+                          node,
+                          // ★追加(Dialectic): DefeaterがdefeatedかinDoubtかを表示に反映する
+                          defeaterBacked: node.type == GsnNodeType.defeater
+                              ? _isDefeaterBacked(node, nodes, edges)
+                              : false,
+                        ),
                       );
                     }).toList(),
                   ],
@@ -2760,6 +3604,12 @@ class GsnResultViewer extends StatelessWidget {
         return Colors.orangeAccent.shade100; // 編集画面のStrategy色
       case GsnNodeType.context:
         return Colors.purple.shade100; // 編集画面のContext色
+      case GsnNodeType.assumption:
+        return Colors.yellow.shade100; // 編集画面のAssumption色
+      case GsnNodeType.justification:
+        return Colors.teal.shade100; // 編集画面のJustification色
+      case GsnNodeType.defeater: // ★追加(Defeater)
+        return Colors.red.shade100; // 編集画面のDefeater色
       case GsnNodeType.map:
         return Colors.black; // 編集画面のMap色
       case GsnNodeType.evidence:
@@ -2773,9 +3623,13 @@ class GsnResultViewer extends StatelessWidget {
   }
 
   // ▼▼▼ ノードの形状定義（Evidenceを楕円にする） ▼▼▼
+  // ★注記(Defeater): このビューアはShapeBorder（楕円/角丸四角形）のみ対応のため、
+  // 編集画面のような六角形は再現できない。Defeaterは角丸四角形（既定のradius=8.0）にフォールバックする。
   ShapeBorder _getNodeShape(GsnNodeType type) {
-    if (type == GsnNodeType.evidence) {
-      // Evidenceは楕円形
+    if (type == GsnNodeType.evidence ||
+        type == GsnNodeType.assumption ||
+        type == GsnNodeType.justification) {
+      // Evidence/Assumption/Justificationは楕円形
       return const OvalBorder(side: BorderSide(color: Colors.black));
     }
     // その他は角丸四角形または四角形
@@ -2802,11 +3656,6 @@ class _SimpleEdgePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.black
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-
     for (var edge in edges) {
       // IDからノードオブジェクトを検索
       try {
@@ -2821,7 +3670,21 @@ class _SimpleEdgePainter extends CustomPainter {
             toNode.position.dx + toNode.width / 2,
             toNode.position.dy + toNode.height / 2);
 
-        canvas.drawLine(start, end, paint);
+        // ★追加(Dialectic): challengesエッジ(Defeaterへのアタッチ)は破線・赤系で区別する
+        final isChallenge = _isChallengesEdge(toNode);
+        final paint = Paint()
+          ..color = isChallenge ? Colors.red.shade700 : Colors.black
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke;
+
+        if (isChallenge) {
+          final path = Path()
+            ..moveTo(start.dx, start.dy)
+            ..lineTo(end.dx, end.dy);
+          _drawDashedPath(canvas, path, paint);
+        } else {
+          canvas.drawLine(start, end, paint);
+        }
       } catch (e) {
         // ノードが見つからない場合はスキップ
       }
