@@ -11,6 +11,30 @@
         "source": "**",
         "destination": "/index.html"
       }
+    ],
+    "headers": [
+      {
+        "//": "Flutter web のアプリ本体はファイル名にハッシュが付かない（常に main.dart.js）。",
+        "//2": "Firebase Hosting の既定 max-age=3600 のままだと、デプロイしてもブラウザが最大1時間",
+        "//3": "古い版を使い続け、Service Worker も更新に気づけない。ETagによる再検証だけ行わせる。",
+        "source": "/@(index.html|main.dart.js|flutter_service_worker.js|version.json|flutter_bootstrap.js)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
+        "//": "ルート（/）でもindex.htmlが返るため同じ扱いにする。",
+        "source": "/",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
     ]
   }
 }
