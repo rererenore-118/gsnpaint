@@ -39,7 +39,8 @@ enum GsnNodeType {
   undeveloped,
   assumption,
   justification,
-  defeater, // ★追加: Confidence Argument対応。Goal/Strategyへの疑義(反論)を表すノード
+  defeater, // ★追加: Confidence Argument対応。GSNノードへの疑義(反論)を表すノード
+            // （PGSN v0.0.4以降はGoal/Strategy/Evidence/Defeaterのどれにも付けられる）
   recordAccess,
   lambda,
   application,
@@ -95,13 +96,17 @@ void _drawDashedPath(Canvas canvas, Path path, Paint paint,
 // ★追加(Dialectic): DefeaterがGSN v3の言うdefeated(有効な裏付けあり)かinDoubt(未対応)かを判定する。
 // 「未開発(Undeveloped)なGoal的主張による疑義はinDoubt、実際の裏付け(Evidence等)を伴う主張はdefeated」
 // という区別に対応：子(=Defeater自身の主張を支える内容)がUndeveloped以外の形で存在すればdefeated。
+// ★変更(PGSN v0.0.4): Defeater自身にもDefeaterが付く（反証への反証）ようになった。
+// 子のDefeaterは「支え(support)」ではなく「このDefeaterへの疑義」なので、裏付けとは数えない。
 bool _isDefeaterBacked(
     GsnNode defeaterNode, List<GsnNode> allNodes, List<GsnEdge> edges) {
   final nodeMap = {for (final n in allNodes) n.id: n};
   for (final e in edges) {
     if (e.fromId != defeaterNode.id) continue;
     final child = nodeMap[e.toId];
-    if (child != null && child.type != GsnNodeType.undeveloped) {
+    if (child != null &&
+        child.type != GsnNodeType.undeveloped &&
+        child.type != GsnNodeType.defeater) {
       return true;
     }
   }
@@ -694,18 +699,33 @@ class _GsnEditorState extends State<GsnEditor> {
       return left ? ctxChildren.sublist(0, half) : ctxChildren.sublist(half);
     }
 
-    // ★既知の制限: ここはノード自身のwidthのみで幅を確保しており、Defeaterの下に展開される
-    // 反論(Rebuttal)チェーンがDefeater本体より横に広い場合、その分は幅計算に反映されない。
+    // ★追加(PGSN v0.0.4): 横付けノードが横方向に占める幅。Defeater自身にもDefeater（反証への反証）が
+    // 付き得るので、その分を外側へ再帰的に足す。
+    double sideWidth(int cid) {
+      var w = nodeMap[cid]!.width;
+      if (_expandableSideTypes.contains(nodeMap[cid]!.type)) {
+        final nested = (childrenMap[cid] ?? [])
+            .where((c) => _allSideTypes.contains(nodeMap[c]?.type))
+            .toList();
+        if (nested.isNotEmpty) {
+          w += ctxSideGap + nested.map(sideWidth).reduce((a, b) => a > b ? a : b);
+        }
+      }
+      return w;
+    }
+
+    // ★既知の制限: Defeaterの下に展開される反論(Rebuttal)チェーンがDefeater本体より横に広い場合、
+    // その分は幅計算に反映されない（入れ子のDefeaterによる横方向の広がりはsideWidthで反映する）。
     double ctxExtraLeft(int nid) {
       final leftCtxs = ctxSplit(nid, true);
       if (leftCtxs.isEmpty) return 0.0;
-      return (leftCtxs.map((c) => nodeMap[c]!.width).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
+      return (leftCtxs.map(sideWidth).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
     }
 
     double ctxExtraRight(int nid) {
       final rightCtxs = ctxSplit(nid, false);
       if (rightCtxs.isEmpty) return 0.0;
-      return (rightCtxs.map((c) => nodeMap[c]!.width).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
+      return (rightCtxs.map(sideWidth).reduce((a, b) => a > b ? a : b)) + ctxSideGap;
     }
 
     // ★変更(重なり修正): 以前は「サブツリー幅」という単一の値で持ち、base領域が中心から左右対称に
@@ -796,6 +816,26 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     }
 
+    // edgeXの外側（toLeftなら左、そうでなければ右）へ横付けノードを縦に積む。
+    // Defeaterは横に付けた上で、その真下に反論(Rebuttal)チェーンを中央揃えで展開し、
+    // ★追加(PGSN v0.0.4): 反証への反証（入れ子のDefeater）を同じ向きのさらに外側へ付ける。
+    void placeSideNodes(List<int> sideIds, double edgeX, double topY, int depth, bool toLeft) {
+      for (int i = 0; i < sideIds.length; i++) {
+        final cid = sideIds[i];
+        placedNodes.add(cid);
+        final cn = nodeMap[cid]!;
+        cn.position = Offset(
+            toLeft ? edgeX - ctxSideGap - cn.width : edgeX + ctxSideGap,
+            topY + i * (cn.height + 10));
+        if (_expandableSideTypes.contains(cn.type)) {
+          placeChildrenBelow(cid, cn.position.dx + cn.width / 2, depth + 1);
+          final outerEdge = toLeft ? cn.position.dx : cn.position.dx + cn.width;
+          placeSideNodes(ctxSplit(cid, true) + ctxSplit(cid, false), outerEdge,
+              cn.position.dy, depth, toLeft);
+        }
+      }
+    }
+
     place = (int nid, double baseCenter, int depth) {
       final node = nodeMap[nid]!;
 
@@ -869,27 +909,8 @@ class _GsnEditorState extends State<GsnEditor> {
       final contentLeftEdge = baseCenter - baseHalfLeft[nid]!;
       final contentRightEdge = baseCenter + baseHalfRight[nid]!;
 
-      final leftCtxs = ctxSplit(nid, true);
-      final rightCtxs = ctxSplit(nid, false);
-      for (int i = 0; i < leftCtxs.length; i++) {
-        final cid = leftCtxs[i];
-        final cn = nodeMap[cid]!;
-        cn.position = Offset(contentLeftEdge - ctxSideGap - cn.width, node.position.dy + i * (cn.height + 10));
-        // ★追加(Defeater): Defeater自身は従来のContextと同じ位置に置きつつ、
-        // その真下に反論(Rebuttal)チェーンがあれば中央揃えで展開する。
-        if (_expandableSideTypes.contains(cn.type)) {
-          placeChildrenBelow(cid, cn.position.dx + cn.width / 2, depth + 1);
-        }
-      }
-      for (int i = 0; i < rightCtxs.length; i++) {
-        final cid = rightCtxs[i];
-        final cn = nodeMap[cid]!;
-        cn.position = Offset(contentRightEdge + ctxSideGap, node.position.dy + i * (cn.height + 10));
-        // ★追加(Defeater): 左側と同様、右側に置かれたDefeaterにも反論チェーンを展開する。
-        if (_expandableSideTypes.contains(cn.type)) {
-          placeChildrenBelow(cid, cn.position.dx + cn.width / 2, depth + 1);
-        }
-      }
+      placeSideNodes(ctxSplit(nid, true), contentLeftEdge, node.position.dy, depth, true);
+      placeSideNodes(ctxSplit(nid, false), contentRightEdge, node.position.dy, depth, false);
     };
 
     // GoalノードのルートをPGSNノードより先に配置する
