@@ -120,6 +120,9 @@ class GsnNode {
   double width;
   double height;
   String label;
+  // ★追加(PGSN v0.0.4): 支持(support)が未展開であることを示す印。評価結果にだけ付く。
+  // GSN規格どおり、独立したノードではなくこのノードの下辺に小さな菱形として描く。
+  final bool undeveloped;
 
   GsnNode({
     required this.id,
@@ -128,6 +131,7 @@ class GsnNode {
     this.width = 100,
     this.height = 60,
     String? label,
+    this.undeveloped = false,
   }) : label = label ?? _gsnTypeName(type);
 
 
@@ -143,6 +147,7 @@ class GsnNode {
       width: json['width'] ?? 100,
       height: json['height'] ?? 60,
       label: json['description'],
+      undeveloped: json['undeveloped'] == true,
     );
   }
 
@@ -154,6 +159,7 @@ class GsnNode {
         'position_y': position.dy,
         'width': width,
         'height': height,
+        if (undeveloped) 'undeveloped': true,
       };
 
   // Flaskサーバ（build_gsn.py）が期待する文字列と完全一致させる必要がある。
@@ -233,6 +239,7 @@ class _DiagramSnapshot {
                 width: n.width,
                 height: n.height,
                 label: n.label,
+                undeveloped: n.undeveloped,
               ))
           .toList(),
       edges: edges.map((e) => GsnEdge(e.fromId, e.toId)).toList(),
@@ -3143,6 +3150,46 @@ class DefeaterPainter extends CustomPainter {
       oldDelegate is! DefeaterPainter || oldDelegate.backed != backed;
 }
 
+// ★追加(PGSN v0.0.4): 未展開の印（GSN規格のUndeveloped）。ノード下辺の中央に上の頂点を接する小さな菱形。
+// サーバ(build_gsn.py)の UNDEVELOPED_MARKER_H と高さを揃えること。
+const Size _undevelopedMarkerSize = Size(20, 14);
+
+void _paintUndevelopedMarker(Canvas canvas, GsnNode node) {
+  final top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
+  final w = _undevelopedMarkerSize.width / 2;
+  final h = _undevelopedMarkerSize.height;
+  final path = Path()
+    ..moveTo(top.dx, top.dy)
+    ..lineTo(top.dx + w, top.dy + h / 2)
+    ..lineTo(top.dx, top.dy + h)
+    ..lineTo(top.dx - w, top.dy + h / 2)
+    ..close();
+  canvas.drawPath(path, Paint()..color = Colors.white);
+  canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black
+        ..strokeWidth = 1.5
+        ..style = PaintingStyle.stroke);
+}
+
+// 評価結果ビューアで、ノードの上に未展開の印を重ねて描く
+class _UndevelopedMarkerPainter extends CustomPainter {
+  final List<GsnNode> nodes;
+  _UndevelopedMarkerPainter(this.nodes);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final n in nodes) {
+      if (n.undeveloped) _paintUndevelopedMarker(canvas, n);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _UndevelopedMarkerPainter oldDelegate) =>
+      oldDelegate.nodes != nodes;
+}
+
 class UndevelopedPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -3603,6 +3650,13 @@ class GsnResultViewer extends StatelessWidget {
                         ),
                       );
                     }).toList(),
+                    // ★追加(PGSN v0.0.4): 未展開の印をノードの下辺に重ねる
+                    IgnorePointer(
+                      child: CustomPaint(
+                        size: Size(canvasWidth, canvasHeight),
+                        painter: _UndevelopedMarkerPainter(nodes),
+                      ),
+                    ),
                   ],
                 ),
               ),

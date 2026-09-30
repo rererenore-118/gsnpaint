@@ -44,7 +44,8 @@ Future<_DiagramRaster> _renderDiagramPng({
     minX = min(minX, n.position.dx);
     minY = min(minY, n.position.dy);
     maxX = max(maxX, n.position.dx + n.width);
-    maxY = max(maxY, n.position.dy + n.height);
+    maxY = max(maxY,
+        n.position.dy + n.height + (n.undeveloped ? _undevelopedMarkerSize.height : 0));
   }
 
   final logicalWidth = (maxX - minX) + _pdfMargin * 2;
@@ -83,6 +84,10 @@ Future<_DiagramRaster> _renderDiagramPng({
           : false,
     );
     canvas.restore();
+  }
+  // 未展開の印はノードのローカル座標ではなくワールド座標で描く（ビューアと同じ関数）
+  for (final node in nodes) {
+    if (node.undeveloped) _paintUndevelopedMarker(canvas, node);
   }
 
   final picture = recorder.endRecording();
