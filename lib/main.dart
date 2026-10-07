@@ -44,6 +44,10 @@ void main() async {
     await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
     FirebaseFirestore.instance.useFirestoreEmulator('localhost', 8080);
   }
+  // 確認メール・パスワード再設定メールを日本語で送る。
+  // 注意: エミュレータへの接続より前に Auth の操作をすると本物の Firebase に接続されたままになるため、
+  // 必ず上のエミュレータ設定の後に呼ぶ。
+  await FirebaseAuth.instance.setLanguageCode('ja');
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: GsnEditor(),
@@ -335,6 +339,19 @@ class _GsnEditorState extends State<GsnEditor> {
   User? _user;
   StreamSubscription<User?>? _authSub;
 
+  // クラウド保存（図・CSV）を使えるか。ログインに加え、メールアドレスの確認が必要
+  // （firestore.rules でも確認済みのアカウントしか読み書きできない）。
+  bool get _cloudReady => _user != null && _user!.emailVerified;
+
+  /// クラウド保存を使えない理由（使えるなら null）
+  String? get _cloudBlockedReason {
+    if (_user == null) return 'ログインしてください。';
+    if (!_user!.emailVerified) {
+      return 'メールアドレスの確認が済んでいません。アカウントボタンから確認してください。';
+    }
+    return null;
+  }
+
   // アカウント（Firestore）への図の保存・読み出し
   final CloudDiagramService _cloudService = CloudDiagramService();
   // アカウント（Firestore）に置くCSV。FileListノードが参照する
@@ -498,8 +515,9 @@ class _GsnEditorState extends State<GsnEditor> {
   void initState() {
     super.initState();
     _clearLocalStorage();
-    // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る
-    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
+    // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る。
+    // userChanges() はメールアドレスの確認状態が更新されたとき（reload 後）にも通知される。
+    _authSub = FirebaseAuth.instance.userChanges().listen((user) {
       if (mounted) {
         setState(() {
           // 別のアカウントに切り替わったら、前のアカウントの図の名前は引き継がない
@@ -547,8 +565,9 @@ class _GsnEditorState extends State<GsnEditor> {
         .map((n) => n.label.trim())
         .toSet();
     if (csvNames.isNotEmpty) {
-      if (_user == null) {
-        _showErrorDialog('CSVファイルを使う図の評価にはログインが必要です。');
+      if (_cloudBlockedReason != null) {
+        _showErrorDialog('CSVファイルを使う図の評価には、ログインとメールアドレスの確認が必要です。\n'
+            '$_cloudBlockedReason');
         return;
       }
       try {
@@ -1285,14 +1304,17 @@ class _GsnEditorState extends State<GsnEditor> {
           IconButton(
             icon: Icon(
               _user != null ? Icons.person : Icons.person_outline,
-              color: _user != null ? Colors.blue : null,
+              // 青: 使える状態 / オレンジ: メールアドレス未確認
+              color: _user == null ? null : (_cloudReady ? Colors.blue : Colors.orange),
             ),
             onPressed: _openAccount,
-            tooltip: _user != null
-                ? 'アカウント（${_user!.email ?? ""}）'
-                : 'ログイン / 新規登録',
+            tooltip: _user == null
+                ? 'ログイン / 新規登録'
+                : _cloudReady
+                    ? 'アカウント（${_user!.email ?? ""}）'
+                    : 'アカウント（メールアドレス未確認）',
           ),
-          if (_user != null) ...[
+          if (_cloudReady) ...[
             IconButton(
               icon: const Icon(Icons.save),
               onPressed: _saveToCloud,
@@ -1754,8 +1776,8 @@ class _GsnEditorState extends State<GsnEditor> {
 
   /// CSVを選んでアカウント（Firestore）に保存する。同じ名前のCSVがあれば上書きを確認する。
   Future<void> _uploadCsv() async {
-    if (_user == null) {
-      _showResultDialog('ログインが必要です', 'CSVのアップロードにはログインしてください。');
+    if (_cloudBlockedReason != null) {
+      _showResultDialog('CSVをアップロードできません', _cloudBlockedReason!);
       return;
     }
 
@@ -1818,8 +1840,8 @@ class _GsnEditorState extends State<GsnEditor> {
 
   /// アカウントのCSVから1つ選んで FileList ノードを置く
   Future<void> _addFileListNode(Offset position) async {
-    if (_user == null) {
-      _showResultDialog('ログインが必要です', 'CSVファイルを使うにはログインしてください。');
+    if (_cloudBlockedReason != null) {
+      _showResultDialog('CSVファイルを使えません', _cloudBlockedReason!);
       return;
     }
     try {
@@ -1914,45 +1936,30 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  /// アカウントボタン: 未ログインならログインダイアログ、ログイン中ならアカウント情報とログアウト
+  /// アカウントボタン: 未ログインならログインダイアログ、ログイン中ならアカウント情報
+  /// （メールアドレス未確認なら確認メールの再送・確認状態の更新）とログアウト
   Future<void> _openAccount() async {
-    final user = _user;
-    if (user == null) {
+    if (_user == null) {
       final signedIn = await showDialog<bool>(
         context: context,
         builder: (ctx) => const AccountDialog(),
       );
-      if (signedIn == true && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${FirebaseAuth.instance.currentUser?.email ?? ""} でログインしました。')),
-        );
-      }
+      if (signedIn != true || !mounted) return;
+      final user = FirebaseAuth.instance.currentUser;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${user?.email ?? ""} でログインしました。')),
+      );
+      // 未確認ならそのまま確認の案内を出す（新規登録直後は確認メール送信済み）
+      if (user != null && !user.emailVerified) await _showAccountInfo();
       return;
     }
+    await _showAccountInfo();
+  }
 
+  Future<void> _showAccountInfo() async {
     final signOut = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('アカウント'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('ログイン中のアカウント'),
-            const SizedBox(height: 4),
-            SelectableText(user.email ?? '（メールアドレスなし）',
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('閉じる')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('ログアウト')),
-        ],
-      ),
+      builder: (ctx) => const AccountInfoDialog(),
     );
     if (signOut == true) {
       await FirebaseAuth.instance.signOut();
@@ -1961,6 +1968,8 @@ class _GsnEditorState extends State<GsnEditor> {
           const SnackBar(content: Text('ログアウトしました。')),
         );
       }
+    } else if (_cloudReady && mounted) {
+      setState(() {}); // 確認済みになったらボタンを出す
     }
   }
 

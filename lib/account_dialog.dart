@@ -53,8 +53,11 @@ class _AccountDialogState extends State<AccountDialog> {
 
   Future<void> _submit() => _run(() async {
         if (_isRegisterMode) {
-          await _auth.createUserWithEmailAndPassword(
+          final cred = await _auth.createUserWithEmailAndPassword(
               email: _email, password: _passwordController.text);
+          // 本人のメールアドレスか確かめるため、確認リンク付きのメールを送る。
+          // 確認が済むまでクラウド保存は使えない（firestore.rules でも拒否する）。
+          await cred.user?.sendEmailVerification();
         } else {
           await _auth.signInWithEmailAndPassword(
               email: _email, password: _passwordController.text);
@@ -201,6 +204,139 @@ class _AccountDialogState extends State<AccountDialog> {
           onPressed: _busy ? null : () => Navigator.of(context).pop(false),
           child: const Text('閉じる'),
         ),
+      ],
+    );
+  }
+}
+
+
+/// ログイン中のアカウント情報。メールアドレスが未確認なら確認メールの再送と確認状態の更新ができる。
+/// 閉じるときに、ログアウトが押されたら true を返す。
+class AccountInfoDialog extends StatefulWidget {
+  const AccountInfoDialog({super.key});
+
+  @override
+  State<AccountInfoDialog> createState() => _AccountInfoDialogState();
+}
+
+class _AccountInfoDialogState extends State<AccountInfoDialog> {
+  final _auth = FirebaseAuth.instance;
+  bool _busy = false;
+  String? _error;
+  String? _info;
+
+  User? get _user => _auth.currentUser;
+
+  Future<void> _run(Future<void> Function() action) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _info = null;
+    });
+    try {
+      await action();
+    } on FirebaseAuthException catch (e) {
+      if (mounted) {
+        setState(() => _error = e.code == 'too-many-requests'
+            ? '短時間に何度も送信されました。しばらく待ってから再送してください。'
+            : '失敗しました（${e.code}）。');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = 'エラーが発生しました: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resend() => _run(() async {
+        await _user?.sendEmailVerification();
+        if (mounted) {
+          setState(() => _info = '${_user?.email} に確認メールを再送しました。');
+        }
+      });
+
+  /// メール内のリンクを押した後の確認状態を取り込む。
+  /// 確認済みの情報はログイン用トークンに入っているため、トークンも取り直す
+  /// （取り直さないと firestore.rules が未確認のまま扱う）。
+  Future<void> _refresh() => _run(() async {
+        await _user?.reload();
+        if (_user?.emailVerified == true) {
+          await _user?.getIdToken(true);
+          if (mounted) Navigator.of(context).pop(false);
+        } else if (mounted) {
+          setState(() => _error = 'まだ確認されていません。メール内のリンクを押してから、もう一度お試しください。');
+        }
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final user = _user;
+    final verified = user?.emailVerified ?? false;
+    return AlertDialog(
+      title: const Text('アカウント'),
+      content: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('ログイン中のアカウント'),
+            const SizedBox(height: 4),
+            SelectableText(user?.email ?? '（メールアドレスなし）',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            if (verified)
+              const Row(children: [
+                Icon(Icons.verified, color: Colors.green, size: 18),
+                SizedBox(width: 4),
+                Text('メールアドレス確認済み'),
+              ])
+            else ...[
+              const Row(children: [
+                Icon(Icons.mark_email_unread, color: Colors.orange, size: 18),
+                SizedBox(width: 4),
+                Text('メールアドレスが未確認です',
+                    style: TextStyle(color: Colors.orange)),
+              ]),
+              const SizedBox(height: 8),
+              const Text(
+                '登録したアドレスに届いた確認メールのリンクを押してから、'
+                '「確認した」を押してください。確認が済むまで、アカウントへの保存・読み出しと'
+                'CSVは使えません。\n'
+                'メールが届かない場合は、迷惑メールフォルダも確認してください。',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              Row(children: [
+                FilledButton(
+                    onPressed: _busy ? null : _refresh,
+                    child: const Text('確認した')),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                    onPressed: _busy ? null : _resend,
+                    child: const Text('確認メールを再送')),
+              ]),
+            ],
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              ),
+            if (_info != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_info!, style: const TextStyle(color: Colors.green)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.pop(context, false),
+            child: const Text('閉じる')),
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.pop(context, true),
+            child: const Text('ログアウト')),
       ],
     );
   }
