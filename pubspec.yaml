@@ -41,6 +41,9 @@ dependencies:
   extension_google_sign_in_as_googleapis_auth: ^2.0.12 # google_sign_in と googleapis を繋ぐ
   http: ^1.2.1
   pdf: ^3.11.3
+  firebase_core: ^4.15.0
+  firebase_auth: ^6.7.0
+  cloud_firestore: ^6.10.0
 
 dev_dependencies:
   flutter_test:

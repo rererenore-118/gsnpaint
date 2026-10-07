@@ -15,14 +15,18 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'google_drive_service.dart';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // ★追加(接続キャンセル): 右クリックを「接続のキャンセル」に割り当てるため、
   // ブラウザ標準のコンテキストメニューを止める。
   BrowserContextMenu.disableContextMenu();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: GsnEditor(),

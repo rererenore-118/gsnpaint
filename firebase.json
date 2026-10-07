@@ -36,5 +36,17 @@
         ]
       }
     ]
+  },
+  "flutter": {
+    "platforms": {
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "pgsn-editor-app",
+          "configurations": {
+            "web": "1:116586459227:web:03edf0f7bf8081636fcf7e"
+          }
+        }
+      }
+    }
   }
 }
