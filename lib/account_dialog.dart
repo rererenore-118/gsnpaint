@@ -156,6 +156,16 @@ class _AccountDialogState extends State<AccountDialog> {
               ),
               onSubmitted: (_) => _busy ? null : _submit(),
             ),
+            if (_isRegisterMode)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '登録後、確認メールが届きます。iCloud（@icloud.com など）や Outlook のアドレスには'
+                  '届かないことがあるため、Gmail や大学のアドレスでの登録、または'
+                  '「Google でログイン」（確認メール不要）をおすすめします。',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
             if (!_isRegisterMode)
               Align(
                 alignment: Alignment.centerRight,
@@ -303,7 +313,9 @@ class _AccountInfoDialogState extends State<AccountInfoDialog> {
                 '登録したアドレスに届いた確認メールのリンクを押してから、'
                 '「確認した」を押してください。確認が済むまで、アカウントへの保存・読み出しと'
                 'CSVは使えません。\n'
-                'メールが届かない場合は、迷惑メールフォルダも確認してください。',
+                'メールが届かない場合は、迷惑メールフォルダも確認してください。'
+                'iCloud や Outlook のアドレスには届かないことがあります。その場合はログアウトして、'
+                'Gmail などのアドレスで登録し直すか、「Google でログイン」を使ってください。',
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 12),
