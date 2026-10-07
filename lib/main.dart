@@ -2,6 +2,7 @@
 // パレットからノードをドラッグして配置し、▶ボタンでFlaskサーバにPOSTしてPGSN評価結果をダイアログ表示する。
 // エディタ状態はブラウザのSharedPreferencesに自動保存される。
 
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,7 +17,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'google_drive_service.dart';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
+import 'account_dialog.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -27,6 +30,11 @@ void main() async {
   // ブラウザ標準のコンテキストメニューを止める。
   BrowserContextMenu.disableContextMenu();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // 開発時の動作確認用: --dart-define=USE_FIREBASE_EMULATOR=true で起動したときだけ、
+  // 本物の Firebase ではなくローカルのエミュレータ（firebase emulators:start）につなぐ。
+  if (const bool.fromEnvironment('USE_FIREBASE_EMULATOR')) {
+    await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
+  }
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: GsnEditor(),
@@ -317,6 +325,11 @@ class _GsnEditorState extends State<GsnEditor> {
   final GoogleDriveService _driveService = GoogleDriveService();
   bool _isDriveSignedIn = false;
 
+  // エディタのアカウント（Firebase Authentication）。null ならログインしていない。
+  // Google Drive 連携のサインインとは別物で、こちらはクラウド保存（Firestore）に使う。
+  User? _user;
+  StreamSubscription<User?>? _authSub;
+
   Offset _snapToGrid(Offset pos) {
     if (!_gridSnapEnabled) return pos;
     return Offset(
@@ -474,10 +487,15 @@ class _GsnEditorState extends State<GsnEditor> {
     super.initState();
     _clearLocalStorage();
     _initDrive();
+    // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
+      if (mounted) setState(() => _user = user);
+    });
   }
 
   @override
   void dispose() {
+    _authSub?.cancel();
     _connectPreviewEnd.dispose();
     super.dispose();
   }
@@ -1229,6 +1247,17 @@ class _GsnEditorState extends State<GsnEditor> {
             icon: const Icon(Icons.folder_open),
             tooltip: 'ローカルJSON読み込み',
           ),
+          // エディタのアカウント（ログイン/ログアウト）
+          IconButton(
+            icon: Icon(
+              _user != null ? Icons.person : Icons.person_outline,
+              color: _user != null ? Colors.blue : null,
+            ),
+            onPressed: _openAccount,
+            tooltip: _user != null
+                ? 'アカウント（${_user!.email ?? ""}）'
+                : 'ログイン / 新規登録',
+          ),
           // Google Drive 連携ボタン群
           IconButton(
             icon: Icon(
@@ -1237,8 +1266,8 @@ class _GsnEditorState extends State<GsnEditor> {
             ),
             onPressed: _toggleDriveSignIn,
             tooltip: _isDriveSignedIn
-                ? 'Googleサインアウト（${_driveService.currentUser?.email ?? ""}）'
-                : 'Googleサインイン',
+                ? 'Google ドライブからサインアウト（${_driveService.currentUser?.email ?? ""}）'
+                : 'Google ドライブにサインイン',
           ),
           if (_isDriveSignedIn) ...[
             IconButton(
@@ -1872,6 +1901,56 @@ class _GsnEditorState extends State<GsnEditor> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('エラー: $e')),
+        );
+      }
+    }
+  }
+
+  /// アカウントボタン: 未ログインならログインダイアログ、ログイン中ならアカウント情報とログアウト
+  Future<void> _openAccount() async {
+    final user = _user;
+    if (user == null) {
+      final signedIn = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => const AccountDialog(),
+      );
+      if (signedIn == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${FirebaseAuth.instance.currentUser?.email ?? ""} でログインしました。')),
+        );
+      }
+      return;
+    }
+
+    final signOut = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('アカウント'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('ログイン中のアカウント'),
+            const SizedBox(height: 4),
+            SelectableText(user.email ?? '（メールアドレスなし）',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('閉じる')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('ログアウト')),
+        ],
+      ),
+    );
+    if (signOut == true) {
+      await FirebaseAuth.instance.signOut();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ログアウトしました。')),
         );
       }
     }
