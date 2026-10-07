@@ -40,6 +40,20 @@
   <meta name="google-signin-client_id" content="1056372482826-u0qai6fci7ed7285ebfcevkvgd88tcd7.apps.googleusercontent.com">
 </head>
 <body>
+  <script>
+    // 以前の版が登録した Service Worker と、その保存データを取り除く。
+    // これが残っていると、デプロイ後も古い版のアプリが表示され続ける。
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+      });
+    }
+    if (window.caches) {
+      caches.keys().then(function (keys) {
+        keys.forEach(function (k) { caches.delete(k); });
+      });
+    }
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
