@@ -14,7 +14,6 @@ import 'package:http/http.dart' as http;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'google_drive_service.dart';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -331,12 +330,8 @@ class _GsnEditorState extends State<GsnEditor> {
   static const double _collapseBadgeHitArea =
       _collapseBadgeInset + _collapseBadgeSize + 6.0;
 
-  // Google Drive 連携
-  final GoogleDriveService _driveService = GoogleDriveService();
-  bool _isDriveSignedIn = false;
-
   // エディタのアカウント（Firebase Authentication）。null ならログインしていない。
-  // Google Drive 連携のサインインとは別物で、こちらはクラウド保存（Firestore）に使う。
+  // 図やCSVのクラウド保存（Firestore）に使う。
   User? _user;
   StreamSubscription<User?>? _authSub;
 
@@ -503,7 +498,6 @@ class _GsnEditorState extends State<GsnEditor> {
   void initState() {
     super.initState();
     _clearLocalStorage();
-    _initDrive();
     // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る
     _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
       if (mounted) {
@@ -526,15 +520,6 @@ class _GsnEditorState extends State<GsnEditor> {
   Future<void> _clearLocalStorage() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('gsn_editor_data');
-  }
-
-  /// アプリ起動時に前回のサインイン状態を静かに復元する
-  Future<void> _initDrive() async {
-    _driveService.onCurrentUserChanged.listen((account) {
-      if (mounted) setState(() => _isDriveSignedIn = account != null);
-    });
-    final account = await _driveService.signInSilently();
-    if (mounted) setState(() => _isDriveSignedIn = account != null);
   }
 
   // エディタの状態は変更せず、評価結果を別ダイアログで表示する（非破壊的）。
@@ -1319,29 +1304,6 @@ class _GsnEditorState extends State<GsnEditor> {
               tooltip: 'アカウントから開く',
             ),
           ],
-          // Google Drive 連携ボタン群
-          IconButton(
-            icon: Icon(
-              _isDriveSignedIn ? Icons.account_circle : Icons.account_circle_outlined,
-              color: _isDriveSignedIn ? Colors.green : null,
-            ),
-            onPressed: _toggleDriveSignIn,
-            tooltip: _isDriveSignedIn
-                ? 'Google ドライブからサインアウト（${_driveService.currentUser?.email ?? ""}）'
-                : 'Google ドライブにサインイン',
-          ),
-          if (_isDriveSignedIn) ...[
-            IconButton(
-              icon: const Icon(Icons.cloud_upload),
-              onPressed: _saveToDrive,
-              tooltip: 'Driveに保存',
-            ),
-            IconButton(
-              icon: const Icon(Icons.cloud_download),
-              onPressed: _loadFromDrive,
-              tooltip: 'Driveから読み込み',
-            ),
-          ],
           IconButton(
             icon: const Icon(Icons.upload_file),
             tooltip: 'CSVをアカウントにアップロード',
@@ -1952,43 +1914,6 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  // ---- Google Drive 連携 ----
-
-  /// サインイン／サインアウトを切り替える
-  Future<void> _toggleDriveSignIn() async {
-    try {
-      if (_isDriveSignedIn) {
-        await _driveService.signOut();
-        if (mounted) {
-          setState(() => _isDriveSignedIn = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Google ドライブからサインアウトしました。')),
-          );
-        }
-      } else {
-        final account = await _driveService.signIn();
-        if (mounted) {
-          if (account != null) {
-            setState(() => _isDriveSignedIn = true);
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('${account.email} でサインインしました。')),
-            );
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('サインインがキャンセルされました。')),
-            );
-          }
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('エラー: $e')),
-        );
-      }
-    }
-  }
-
   /// アカウントボタン: 未ログインならログインダイアログ、ログイン中ならアカウント情報とログアウト
   Future<void> _openAccount() async {
     final user = _user;
@@ -2070,7 +1995,7 @@ class _GsnEditorState extends State<GsnEditor> {
         if (overwrite != true) return;
       }
 
-      // 中身はローカルの「JSON保存」・Drive 保存と同じ形式
+      // 中身はローカルの「JSON保存」と同じ形式
       final data = {
         'nodes': _nodes.map((n) => n.toJson()).toList(),
         'edges': _edges.map((e) => e.toJson()).toList(),
@@ -2125,241 +2050,7 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     }
   }
-
-  /// 保存ダイアログを表示して Google Drive に保存する
-  Future<void> _saveToDrive() async {
-    if (!_isDriveSignedIn) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('先にGoogleアカウントでサインインしてください。')),
-      );
-      return;
-    }
-
-    // 保存先はマイドライブ直下のアプリ専用フォルダに固定しているため、
-    // フォルダ選択は無くしてファイル名だけを聞く。
-    final fileName = await showDialog<String>(
-      context: context,
-      builder: (ctx) => const _DriveSaveDialog(),
-    );
-    if (fileName == null) return; // キャンセル
-
-    try {
-      final data = {
-        'nodes': _nodes.map((n) => n.toJson()).toList(),
-        'edges': _edges.map((e) => e.toJson()).toList(),
-        'nodeCounter': _nodeCounter,
-      };
-      final jsonString = const JsonEncoder.withIndent('  ').convert(data);
-      await _driveService.saveFile(jsonString, fileName);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('「$fileName.json」を Google ドライブの'
-                '「${GoogleDriveService.appFolderName}」フォルダに保存しました。'),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存に失敗しました: $e')),
-        );
-      }
-    }
-  }
-
-  /// ファイル一覧ダイアログを表示して Google Drive から読み込む
-  Future<void> _loadFromDrive() async {
-    if (!_isDriveSignedIn) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('先にGoogleアカウントでサインインしてください。')),
-      );
-      return;
-    }
-
-    // ファイル一覧を取得（アプリ専用フォルダの中だけを検索）
-    List<DriveItem> files = [];
-    try {
-      files = await _driveService.listJsonFiles();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('ファイル一覧の取得に失敗しました: $e')),
-        );
-      }
-      return;
-    }
-
-    if (!mounted) return;
-
-    if (files.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Google ドライブの「${GoogleDriveService.appFolderName}」'
-              'フォルダに保存済みの図がありません。'),
-        ),
-      );
-      return;
-    }
-
-    // ファイル選択ダイアログを表示
-    final selected = await showDialog<DriveItem>(
-      context: context,
-      builder: (ctx) => _DriveLoadDialog(files: files),
-    );
-    if (selected == null) return; // キャンセル
-
-    try {
-      final jsonString = await _driveService.loadFileById(selected.id);
-      final data = jsonDecode(jsonString);
-      _saveToHistory();
-      setState(() {
-        _nodes.clear();
-        _edges.clear();
-        _nodes.addAll((data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
-        _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
-        _nodeCounter = data['nodeCounter'] ?? 0;
-      });
-      _saveToLocalStorage();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('「${selected.name}」を読み込みました。')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('読み込みに失敗しました: $e')),
-        );
-      }
-    }
-  }
 }
-
-// ---- Drive 保存ダイアログ ----
-// 保存先はアプリ専用フォルダ固定なので、聞くのはファイル名だけ。
-// Navigator.pop にはファイル名（拡張子なし）をそのまま返す。
-
-class _DriveSaveDialog extends StatefulWidget {
-  const _DriveSaveDialog();
-
-  @override
-  State<_DriveSaveDialog> createState() => _DriveSaveDialogState();
-}
-
-class _DriveSaveDialogState extends State<_DriveSaveDialog> {
-  final _nameController = TextEditingController(text: 'gsn');
-
-  @override
-  void dispose() {
-    _nameController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Drive に保存'),
-      content: SizedBox(
-        width: 360,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('ファイル名'),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _nameController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                const Padding(
-                  padding: EdgeInsets.only(left: 6),
-                  child: Text('.json', style: TextStyle(color: Colors.grey)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    'マイドライブの「${GoogleDriveService.appFolderName}」フォルダに'
-                    '保存されます（無ければ自動で作成）。',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('キャンセル'),
-        ),
-        ElevatedButton(
-          onPressed: () {
-            final name = _nameController.text.trim();
-            if (name.isEmpty) return;
-            Navigator.pop(context, name);
-          },
-          child: const Text('保存'),
-        ),
-      ],
-    );
-  }
-}
-
-// ---- Drive 読み込みダイアログ ----
-
-class _DriveLoadDialog extends StatelessWidget {
-  final List<DriveItem> files;
-  const _DriveLoadDialog({required this.files});
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Drive から読み込む'),
-      content: SizedBox(
-        width: 400,
-        child: ListView.separated(
-          shrinkWrap: true,
-          itemCount: files.length,
-          separatorBuilder: (_, __) => const Divider(height: 1),
-          itemBuilder: (ctx, i) {
-            final f = files[i];
-            final modified = f.modifiedTime != null
-                ? f.modifiedTime!.substring(0, 10)
-                : '';
-            return ListTile(
-              leading: const Icon(Icons.insert_drive_file),
-              title: Text(f.name),
-              subtitle: modified.isNotEmpty ? Text('更新: $modified') : null,
-              onTap: () => Navigator.pop(context, f),
-            );
-          },
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('キャンセル'),
-        ),
-      ],
-    );
-  }
-}
-
 
 // ノードタイプ別の形状ウィジェットを返す。
 // Application/Mapはキャンバス上ではラベルを非表示にする（図形の形だけで型が識別できるため）。

@@ -1,6 +1,6 @@
 // エディタのアカウント（Firebase Authentication）のログイン・新規登録ダイアログ。
-// メール/パスワードと Google ログインに対応する。Google ドライブ連携（google_drive_service.dart）
-// とは別のログインで、こちらはエディタ内のクラウド保存（Firestore）に使う。
+// メール/パスワードと Google ログインに対応する。ログインしたアカウントは
+// エディタ内のクラウド保存（Firestore）に使う。
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
