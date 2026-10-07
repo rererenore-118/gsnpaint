@@ -23,9 +23,15 @@ import 'firebase_options.dart';
 import 'account_dialog.dart';
 import 'cloud_diagram_dialogs.dart';
 import 'cloud_diagram_service.dart';
+import 'cloud_csv_service.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
+
+// 評価サーバ（Flask）のURL。手元のサーバで試すときは
+// --dart-define=API_BASE=http://127.0.0.1:5000 を付けて起動する。
+const String _apiBase =
+    String.fromEnvironment('API_BASE', defaultValue: 'https://pgsn-api.onrender.com');
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -336,6 +342,8 @@ class _GsnEditorState extends State<GsnEditor> {
 
   // アカウント（Firestore）への図の保存・読み出し
   final CloudDiagramService _cloudService = CloudDiagramService();
+  // アカウント（Firestore）に置くCSV。FileListノードが参照する
+  final CloudCsvService _csvService = CloudCsvService();
   // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
   String _cloudDiagramName = 'gsn';
 
@@ -534,7 +542,7 @@ class _GsnEditorState extends State<GsnEditor> {
   Future<void> _evaluateGsn() async {
 
     // 送信データ作成
-    final requestData = {
+    final Map<String, Object> requestData = {
       "nodes": _nodes.map((n) => {
         "id": n.id,
         "gsn_type": GsnNode._gsnTypeName(n.type),
@@ -547,10 +555,36 @@ class _GsnEditorState extends State<GsnEditor> {
       "edges":_edges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
     };
 
+    // FileListノードが使うCSVは、アカウントから中身を読んで図と一緒に送る
+    // （評価サーバはCSVを保存しないため）。
+    final csvNames = _nodes
+        .where((n) => n.type == GsnNodeType.fileList)
+        .map((n) => n.label.trim())
+        .toSet();
+    if (csvNames.isNotEmpty) {
+      if (_user == null) {
+        _showErrorDialog('CSVファイルを使う図の評価にはログインが必要です。');
+        return;
+      }
+      try {
+        final contents = await _csvService.loadContents(csvNames);
+        final missing = csvNames.where((n) => !contents.containsKey(n)).toList();
+        if (missing.isNotEmpty) {
+          _showErrorDialog('次のCSVファイルがアカウントにありません。'
+              'アップロードしてから評価してください。\n${missing.join('\n')}');
+          return;
+        }
+        requestData["csv_files"] = contents;
+      } catch (e) {
+        _showErrorDialog('CSVファイルの読み込みに失敗しました: $e');
+        return;
+      }
+    }
+
     try {
       // サーバーへ送信
       final response = await http.post(
-        Uri.parse('https://pgsn-api.onrender.com/evaluate'),
+        Uri.parse('$_apiBase/evaluate'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode(requestData),
       );
@@ -1310,7 +1344,7 @@ class _GsnEditorState extends State<GsnEditor> {
           ],
           IconButton(
             icon: const Icon(Icons.upload_file),
-            tooltip: 'CSVをサーバーにアップロード',
+            tooltip: 'CSVをアカウントにアップロード',
             onPressed: _uploadCsv,
           ),
           IconButton(
@@ -1756,7 +1790,13 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 
 
+  /// CSVを選んでアカウント（Firestore）に保存する。同じ名前のCSVがあれば上書きを確認する。
   Future<void> _uploadCsv() async {
+    if (_user == null) {
+      _showResultDialog('ログインが必要です', 'CSVのアップロードにはログインしてください。');
+      return;
+    }
+
     final input = html.FileUploadInputElement()..accept = '.csv';
     input.click();
 
@@ -1768,33 +1808,45 @@ class _GsnEditorState extends State<GsnEditor> {
       final reader = html.FileReader();
 
       reader.onLoadEnd.listen((e) async {
+        // 評価サーバは UTF-8 として読むため、それ以外（Excel の Shift_JIS 保存など）はここで弾く
+        final String content;
         try {
-          final bytes = reader.result as List<int>;
-          final request = http.MultipartRequest(
-            'POST',
-            Uri.parse('https://pgsn-api.onrender.com/upload'),
-          );
-          request.files.add(http.MultipartFile.fromBytes(
-            'file',
-            bytes,
-            filename: file.name,
-          ));
+          content = utf8
+              .decode(reader.result as List<int>)
+              .replaceFirst('\uFEFF', ''); // BOM付きUTF-8も受け付ける
+        } on FormatException {
+          _showResultDialog('アップロード失敗',
+              'CSVの文字コードが UTF-8 ではありません。\n'
+              'Excel の場合は「CSV UTF-8（コンマ区切り）」で保存し直してください。');
+          return;
+        }
 
-          final response = await request.send();
-          final body = await response.stream.bytesToString();
-          final decoded = jsonDecode(body);
-
-          if (response.statusCode == 200) {
-            final filename = decoded['filename'] as String;
-            final preview = (decoded['preview'] as List)
-                .map((row) => (row as List).join(', '))
-                .join('\n');
-            _showResultDialog('アップロード完了: $filename', '先頭5行:\n$preview');
-          } else {
-            _showResultDialog('アップロード失敗', decoded['error'] ?? '不明なエラー');
+        try {
+          if (await _csvService.exists(file.name)) {
+            if (!mounted) return;
+            final overwrite = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('上書きの確認'),
+                content: Text('「${file.name}」はすでにアカウントにあります。上書きしますか？'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('キャンセル')),
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('上書き')),
+                ],
+              ),
+            );
+            if (overwrite != true) return;
           }
+
+          await _csvService.save(file.name, content);
+          final preview = const LineSplitter().convert(content).take(5).join('\n');
+          _showResultDialog('アップロード完了: ${file.name}', '先頭5行:\n$preview');
         } catch (err) {
-          _showResultDialog('通信エラー', '$err');
+          _showResultDialog('アップロード失敗', '$err');
         }
       });
 
@@ -1802,15 +1854,19 @@ class _GsnEditorState extends State<GsnEditor> {
     });
   }
 
+  /// アカウントのCSVから1つ選んで FileList ノードを置く
   Future<void> _addFileListNode(Offset position) async {
+    if (_user == null) {
+      _showResultDialog('ログインが必要です', 'CSVファイルを使うにはログインしてください。');
+      return;
+    }
     try {
-      final response = await http.get(Uri.parse('https://pgsn-api.onrender.com/files'));
-      final files = (jsonDecode(response.body)['files'] as List).cast<String>();
+      final files = await _csvService.listNames();
 
       if (!mounted) return;
 
       if (files.isEmpty) {
-        _showResultDialog('CSVファイルなし', 'まずCSVをサーバーにアップロードしてください。');
+        _showResultDialog('CSVファイルなし', 'まずCSVをアカウントにアップロードしてください。');
         return;
       }
 
@@ -1854,7 +1910,7 @@ class _GsnEditorState extends State<GsnEditor> {
         ),
       );
     } catch (e) {
-      _showResultDialog('通信エラー', 'サーバーに接続できませんでした。\n$e');
+      _showResultDialog('エラー', 'CSVファイルの一覧を取得できませんでした。\n$e');
     }
   }
 
