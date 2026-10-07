@@ -18,8 +18,11 @@ import 'google_drive_service.dart';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart' show FirebaseFirestore;
 import 'firebase_options.dart';
 import 'account_dialog.dart';
+import 'cloud_diagram_dialogs.dart';
+import 'cloud_diagram_service.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -34,6 +37,7 @@ void main() async {
   // 本物の Firebase ではなくローカルのエミュレータ（firebase emulators:start）につなぐ。
   if (const bool.fromEnvironment('USE_FIREBASE_EMULATOR')) {
     await FirebaseAuth.instance.useAuthEmulator('localhost', 9099);
+    FirebaseFirestore.instance.useFirestoreEmulator('localhost', 8080);
   }
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
@@ -330,6 +334,11 @@ class _GsnEditorState extends State<GsnEditor> {
   User? _user;
   StreamSubscription<User?>? _authSub;
 
+  // アカウント（Firestore）への図の保存・読み出し
+  final CloudDiagramService _cloudService = CloudDiagramService();
+  // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
+  String _cloudDiagramName = 'gsn';
+
   Offset _snapToGrid(Offset pos) {
     if (!_gridSnapEnabled) return pos;
     return Offset(
@@ -489,7 +498,13 @@ class _GsnEditorState extends State<GsnEditor> {
     _initDrive();
     // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る
     _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
-      if (mounted) setState(() => _user = user);
+      if (mounted) {
+        setState(() {
+          // 別のアカウントに切り替わったら、前のアカウントの図の名前は引き継がない
+          if (user?.uid != _user?.uid) _cloudDiagramName = 'gsn';
+          _user = user;
+        });
+      }
     });
   }
 
@@ -1258,6 +1273,18 @@ class _GsnEditorState extends State<GsnEditor> {
                 ? 'アカウント（${_user!.email ?? ""}）'
                 : 'ログイン / 新規登録',
           ),
+          if (_user != null) ...[
+            IconButton(
+              icon: const Icon(Icons.save),
+              onPressed: _saveToCloud,
+              tooltip: 'アカウントに保存',
+            ),
+            IconButton(
+              icon: const Icon(Icons.folder_special),
+              onPressed: _openFromCloud,
+              tooltip: 'アカウントから開く',
+            ),
+          ],
           // Google Drive 連携ボタン群
           IconButton(
             icon: Icon(
@@ -1951,6 +1978,93 @@ class _GsnEditorState extends State<GsnEditor> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('ログアウトしました。')),
+        );
+      }
+    }
+  }
+
+  // ---- アカウント（Firestore）への保存・読み出し ----
+
+  /// 名前を聞いてアカウントに保存する。同名の図があれば上書きを確認する。
+  Future<void> _saveToCloud() async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => CloudSaveDialog(initialName: _cloudDiagramName),
+    );
+    if (name == null || !mounted) return;
+
+    try {
+      if (await _cloudService.findIdByName(name) != null) {
+        if (!mounted) return;
+        final overwrite = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('上書きの確認'),
+            content: Text('「$name」はすでに保存されています。上書きしますか？'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('キャンセル')),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('上書き')),
+            ],
+          ),
+        );
+        if (overwrite != true) return;
+      }
+
+      // 中身はローカルの「JSON保存」・Drive 保存と同じ形式
+      final data = {
+        'nodes': _nodes.map((n) => n.toJson()).toList(),
+        'edges': _edges.map((e) => e.toJson()).toList(),
+        'nodeCounter': _nodeCounter,
+      };
+      await _cloudService.save(name, jsonEncode(data));
+      _cloudDiagramName = name;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('「$name」をアカウントに保存しました。')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存に失敗しました: $e')),
+        );
+      }
+    }
+  }
+
+  /// 自分の図の一覧から選んで開く（一覧から削除もできる）
+  Future<void> _openFromCloud() async {
+    final selected = await showDialog<CloudDiagram>(
+      context: context,
+      builder: (ctx) => CloudOpenDialog(service: _cloudService),
+    );
+    if (selected == null) return;
+
+    try {
+      final data = jsonDecode(await _cloudService.load(selected.id));
+      _saveToHistory(); // 開く前の図に Undo で戻れるようにする
+      setState(() {
+        _nodes.clear();
+        _edges.clear();
+        _nodes.addAll((data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
+        _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
+        _nodeCounter = data['nodeCounter'] ?? 0;
+      });
+      _saveToLocalStorage();
+      _cloudDiagramName = selected.name;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('「${selected.name}」を開きました。')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('読み込みに失敗しました: $e')),
         );
       }
     }

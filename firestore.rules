@@ -1,0 +1,11 @@
+rules_version = '2';
+
+// エディタのアカウントごとのデータ（図・CSV）は users/{uid} 以下に置く。
+// ログインした本人（uid が一致する場合）だけが読み書きでき、それ以外はすべて拒否する。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
