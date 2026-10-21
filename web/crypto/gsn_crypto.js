@@ -3,7 +3,8 @@
 //
 // 鍵の構成:
 //   暗号化パスフレーズ ─PBKDF2─▶ KEK ─┐
-//   回復キー           ─HKDF───▶ KEK ─┴─ MK（利用者の主鍵）を包む
+//   回復キー           ─HKDF───▶ KEK ─┼─ MK（利用者の主鍵）を包む
+//   パスキー（PRF）    ─HKDF───▶ KEK ─┘  パスキーごとに1つ
 //   MK ─▶ 図・CSV 1件ごとの DEK を包む ─▶ DEK で本文を暗号化
 //
 // Dart（lib/crypto_service.dart）からは window.gsnCrypto として呼ぶ。値の受け渡しは文字列（JSON）だけ。
@@ -44,6 +45,15 @@ function fromBase64(text) {
   const out = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
   return out;
+}
+
+function toBase64Url(bytes) {
+  return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(text) {
+  const s = String(text).replace(/-/g, "+").replace(/_/g, "/");
+  return fromBase64(s + "=".repeat((4 - (s.length % 4)) % 4));
 }
 
 function base32Encode(bytes) {
@@ -131,6 +141,14 @@ async function recoveryKek(recoveryKey, saltB64) {
     base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 
+// パスキーの PRF 拡張が返す秘密の値（32バイト）から KEK を作る
+async function passkeyKek(prfOutput, prfSaltB64) {
+  const base = await subtle.importKey("raw", prfOutput, "HKDF", false, ["deriveKey"]);
+  return subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: fromBase64(prfSaltB64), info: enc.encode("gsnpaint passkey") },
+    base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
 function checkPassphrase(passphrase) {
   if (typeof passphrase !== "string" || [...passphrase].length < MIN_PASSPHRASE_LENGTH) {
     throw fail("WEAK_PASSPHRASE", `パスフレーズは${MIN_PASSPHRASE_LENGTH}文字以上にしてください`);
@@ -206,6 +224,116 @@ async function rewrapPassphrase(uid, keyringJson, newPassphrase) {
   return JSON.stringify({ ...k, pass: await wrapMkWithPassphrase(uid, mkRaw, newPassphrase) });
 }
 
+/**
+ * 解除中の主鍵を、パスキーの PRF の値で包んで keyring に加える（新しい鍵の情報の JSON を返す）。
+ * credId はパスキーの ID（base64url）、prfOutputB64 はそのパスキーで prfSaltB64 を評価した結果。
+ */
+async function addPasskeyWrap(uid, keyringJson, credId, prfSaltB64, prfOutputB64, label) {
+  const mk = requireUnlocked(uid);
+  const k = parseKeyring(keyringJson);
+  const mkRaw = new Uint8Array(await subtle.exportKey("raw", mk));
+  const kek = await passkeyKek(fromBase64(prfOutputB64), prfSaltB64);
+  const box = await seal(kek, mkRaw, aad("keyring", uid, "passkey", credId));
+  const passkeys = { ...(k.passkeys || {}) };
+  passkeys[credId] = {
+    prfSalt: prfSaltB64, iv: box.iv, wrappedMk: box.ct,
+    label: String(label || "パスキー").slice(0, 60), createdAt: new Date().toISOString(),
+  };
+  return JSON.stringify({ ...k, passkeys });
+}
+
+/** パスキーの PRF の値で解除する */
+async function unlockWithPasskeyOutput(uid, keyringJson, credId, prfOutputB64) {
+  const k = parseKeyring(keyringJson);
+  const entry = k.passkeys && k.passkeys[credId];
+  if (!entry) throw fail("WRONG_SECRET", "このパスキーは登録されていません");
+  const kek = await passkeyKek(fromBase64(prfOutputB64), entry.prfSalt);
+  const mkRaw = await open(kek, { iv: entry.iv, ct: entry.wrappedMk }, aad("keyring", uid, "passkey", credId), "WRONG_SECRET");
+  await setUnlocked(uid, mkRaw);
+}
+
+// ---- パスキー（WebAuthn の PRF 拡張）----
+// 署名の検証は行わない（サーバがないため）。守りは PRF の値にある: この値はパスキー（端末の
+// 認証器）でしか計算できず、それがないと主鍵を包んだ箱を開けられない。
+
+function webauthnError(e) {
+  if (e && e.message && /^[A-Z_]+: /.test(e.message)) return e;
+  if (e && e.name === "NotAllowedError") return fail("CANCELLED", "パスキーの操作が取り消されたか、時間切れになりました");
+  if (e && e.name === "InvalidStateError") return fail("CANCELLED", "このパスキーはすでに登録されています");
+  return fail("PASSKEY_FAILED", `パスキーを使えませんでした（${(e && e.name) || e}）`);
+}
+
+/** この端末・ブラウザでパスキーの PRF を使えそうか（最終的には登録してみないと分からない） */
+async function passkeySupported() {
+  if (!globalThis.PublicKeyCredential || !navigator.credentials) return false;
+  try {
+    const caps = await PublicKeyCredential.getClientCapabilities?.();
+    if (caps && "extension:prf" in caps) return caps["extension:prf"] === true;
+  } catch (_) { /* 古いブラウザ */ }
+  return true;
+}
+
+// パスキーで prfSalt を評価して、PRF の値（base64）を得る
+async function evaluatePrf(credIds, saltsByCred) {
+  const evalByCredential = {};
+  for (const id of credIds) evalByCredential[id] = { first: fromBase64(saltsByCred[id]) };
+  let cred;
+  try {
+    cred = await navigator.credentials.get({ publicKey: {
+      challenge: randomBytes(32),
+      allowCredentials: credIds.map((id) => ({ type: "public-key", id: fromBase64Url(id) })),
+      userVerification: "required",
+      extensions: { prf: { evalByCredential } },
+    } });
+  } catch (e) {
+    throw webauthnError(e);
+  }
+  const first = cred && cred.getClientExtensionResults().prf?.results?.first;
+  if (!first) throw fail("PRF_UNSUPPORTED", "このパスキーは暗号化の解除に対応していません");
+  return { credId: toBase64Url(cred.rawId), output: toBase64(first) };
+}
+
+/** パスキーを新しく作り、解除中の主鍵をそれで包む。新しい鍵の情報（JSON）を返す */
+async function registerPasskey(uid, keyringJson, userName, label) {
+  requireUnlocked(uid);
+  const k = parseKeyring(keyringJson);
+  const prfSalt = randomBytes(32);
+  let cred;
+  try {
+    cred = await navigator.credentials.create({ publicKey: {
+      rp: { name: "GSNエディタ" },
+      user: { id: enc.encode(uid), name: userName || uid, displayName: userName || "GSNエディタ" },
+      challenge: randomBytes(32),
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
+      excludeCredentials: Object.keys(k.passkeys || {}).map((id) => ({ type: "public-key", id: fromBase64Url(id) })),
+      extensions: { prf: { eval: { first: prfSalt } } },
+    } });
+  } catch (e) {
+    throw webauthnError(e);
+  }
+  const ext = cred.getClientExtensionResults().prf;
+  if (!ext || ext.enabled === false) {
+    throw fail("PRF_UNSUPPORTED", "このパスキー（端末・パスワード管理アプリ）は暗号化の解除に対応していません");
+  }
+  const credId = toBase64Url(cred.rawId);
+  const saltB64 = toBase64(prfSalt);
+  // 作成時に PRF の値を返さない認証器が多いので、その場合はもう一度パスキーで評価する
+  let output = ext.results?.first ? toBase64(ext.results.first) : null;
+  if (!output) output = (await evaluatePrf([credId], { [credId]: saltB64 })).output;
+  return addPasskeyWrap(uid, k, credId, saltB64, output, label);
+}
+
+/** 登録済みのパスキーのどれかで解除する */
+async function unlockWithPasskey(uid, keyringJson) {
+  const k = parseKeyring(keyringJson);
+  const ids = Object.keys(k.passkeys || {});
+  if (ids.length === 0) throw fail("WRONG_SECRET", "パスキーが登録されていません");
+  const salts = Object.fromEntries(ids.map((id) => [id, k.passkeys[id].prfSalt]));
+  const { credId, output } = await evaluatePrf(ids, salts);
+  await unlockWithPasskeyOutput(uid, k, credId, output);
+}
+
 function lock() {
   unlocked = null;
 }
@@ -237,6 +365,7 @@ async function decryptItem(uid, collection, docId, itemJson) {
 
 const api = {
   setupKeyring, unlockWithPassphrase, unlockWithRecoveryKey, rewrapPassphrase,
+  addPasskeyWrap, unlockWithPasskeyOutput, passkeySupported, registerPasskey, unlockWithPasskey,
   lock, unlockedUid, encryptItem, decryptItem,
 };
 

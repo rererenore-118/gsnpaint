@@ -308,6 +308,26 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   final _newConfirm = TextEditingController();
   bool _busy = false;
   String? _error;
+  // 登録済みのパスキーがあり、このブラウザで使えそうなら「パスキーで解除」を出す
+  bool _passkeyAvailable = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkPasskey();
+  }
+
+  Future<void> _checkPasskey() async {
+    try {
+      final available = await CryptoService.passkeySupported() &&
+          (await widget.crypto.listPasskeys()).isNotEmpty;
+      if (mounted) setState(() => _passkeyAvailable = available);
+    } catch (_) {
+      // パスキーが使えなくてもパスフレーズで解除できる
+    }
+  }
+
+  void _unlockWithPasskey() => _run(widget.crypto.unlockWithPasskey, passkey: true);
 
   @override
   void dispose() {
@@ -317,7 +337,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
     super.dispose();
   }
 
-  Future<void> _run(Future<void> Function() action) async {
+  Future<void> _run(Future<void> Function() action, {bool passkey = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -330,9 +350,13 @@ class _UnlockDialogState extends State<_UnlockDialog> {
       if (mounted) {
         setState(() {
           _busy = false;
-          _error = e.code == 'WRONG_SECRET'
-              ? (_mode == _UnlockMode.passphrase ? 'パスフレーズが違います。' : '回復キーが違います。')
-              : e.message;
+          _error = passkey
+              ? (e.code == 'WRONG_SECRET'
+                  ? 'このパスキーでは解除できませんでした。パスフレーズで解除してください。'
+                  : e.message)
+              : e.code == 'WRONG_SECRET'
+                  ? (_mode == _UnlockMode.passphrase ? 'パスフレーズが違います。' : '回復キーが違います。')
+                  : e.message;
         });
       }
     } catch (e) {
@@ -377,6 +401,19 @@ class _UnlockDialogState extends State<_UnlockDialog> {
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           if (!recovering) ...[
             const Text('アカウントの図とCSVを開くには、暗号化パスフレーズを入力してください。'),
+            if (_passkeyAvailable) ...[
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  icon: const Icon(Icons.fingerprint),
+                  label: const Text('パスキーで解除'),
+                  onPressed: _busy ? null : _unlockWithPasskey,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Center(child: Text('または', style: TextStyle(color: Colors.grey))),
+            ],
             const SizedBox(height: 16),
             TextField(
               controller: _pass,
@@ -568,6 +605,294 @@ class _MigrationDialogState extends State<_MigrationDialog> {
       actions: [
         if (_error != null)
           TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('閉じる')),
+      ],
+    );
+  }
+}
+
+// ---- 暗号化の設定（パスキーの登録・削除、パスフレーズの変更）----
+
+/// 解除済みのときに開く。呼び出し側で先に ensureUnlocked() を済ませておく。
+class CryptoSettingsDialog extends StatefulWidget {
+  final CryptoService crypto;
+  const CryptoSettingsDialog({super.key, required this.crypto});
+
+  @override
+  State<CryptoSettingsDialog> createState() => _CryptoSettingsDialogState();
+}
+
+class _CryptoSettingsDialogState extends State<CryptoSettingsDialog> {
+  List<PasskeyInfo>? _passkeys;
+  bool _supported = false;
+  bool _busy = false;
+  String? _error;
+  String? _info;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    try {
+      final supported = await CryptoService.passkeySupported();
+      final passkeys = await widget.crypto.listPasskeys();
+      if (mounted) {
+        setState(() {
+          _supported = supported;
+          _passkeys = passkeys;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = '読み込みに失敗しました: $e');
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action, String doneMessage) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _info = null;
+    });
+    try {
+      await action();
+      await _reload();
+      if (mounted) setState(() => _info = doneMessage);
+    } on CryptoException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _addPasskey() async {
+    final label = await showDialog<String>(
+      context: context,
+      builder: (_) => const _PasskeyLabelDialog(),
+    );
+    if (label == null) return;
+    await _run(() => widget.crypto.registerPasskey(label), 'パスキー「$label」を登録しました。');
+  }
+
+  Future<void> _removePasskey(PasskeyInfo p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('パスキーの登録を外す'),
+        content: Text('「${p.label}」では解除できなくなります（パスフレーズ・回復キーはそのまま使えます）。\n'
+            '端末に残るパスキー自体は、端末やパスワード管理アプリの設定から削除してください。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('キャンセル')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('外す', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() => widget.crypto.removePasskey(p.id), '「${p.label}」の登録を外しました。');
+  }
+
+  Future<void> _changePassphrase() async {
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (_) => _ChangePassphraseDialog(crypto: widget.crypto),
+    );
+    if (changed == true && mounted) setState(() => _info = '暗号化パスフレーズを変更しました。');
+  }
+
+  static String _formatDate(DateTime? t) => t == null
+      ? ''
+      : '${t.toLocal().year}/${t.toLocal().month}/${t.toLocal().day} 登録';
+
+  @override
+  Widget build(BuildContext context) {
+    final passkeys = _passkeys;
+    return AlertDialog(
+      title: const Text('暗号化の設定'),
+      content: SizedBox(
+        width: 440,
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('パスキー', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          const Text(
+            '指紋・顔認証などのパスキーで、パスフレーズを入力せずに解除できます。'
+            'パスキーを登録しても、パスフレーズと回復キーはそのまま使えます。',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          if (passkeys == null)
+            const Center(child: Padding(padding: EdgeInsets.all(12), child: CircularProgressIndicator()))
+          else ...[
+            if (passkeys.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('登録済みのパスキーはありません。', style: TextStyle(color: Colors.grey)),
+              ),
+            for (final p in passkeys)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.fingerprint),
+                title: Text(p.label),
+                subtitle: Text(_formatDate(p.createdAt)),
+                trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: '登録を外す',
+                  onPressed: _busy ? null : () => _removePasskey(p),
+                ),
+              ),
+            if (_supported)
+              OutlinedButton.icon(
+                icon: const Icon(Icons.add),
+                label: const Text('この端末のパスキーを追加'),
+                onPressed: _busy ? null : _addPasskey,
+              )
+            else
+              const Text('このブラウザではパスキーを使えません。',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
+          ],
+          const Divider(height: 32),
+          const Text('暗号化パスフレーズ', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: _busy ? null : _changePassphrase,
+            child: const Text('パスフレーズを変更'),
+          ),
+          if (_busy)
+            const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator()),
+          _errorText(_error),
+          if (_info != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(_info!, style: const TextStyle(color: Colors.green)),
+            ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.of(context).pop(),
+            child: const Text('閉じる')),
+      ],
+    );
+  }
+}
+
+/// パスキーの名前（どの端末のものか分かるように）を聞く
+class _PasskeyLabelDialog extends StatefulWidget {
+  const _PasskeyLabelDialog();
+
+  @override
+  State<_PasskeyLabelDialog> createState() => _PasskeyLabelDialogState();
+}
+
+class _PasskeyLabelDialogState extends State<_PasskeyLabelDialog> {
+  final _label = TextEditingController(text: 'この端末');
+
+  @override
+  void dispose() {
+    _label.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final label = _label.text.trim();
+    if (label.isNotEmpty) Navigator.of(context).pop(label);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('パスキーを追加'),
+      content: SizedBox(
+        width: 380,
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          TextField(
+            controller: _label,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'パスキーの名前（例: 研究室のMac）',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: 8),
+          const Text('このあと端末のパスキーの確認（指紋・顔など）が2回表示されることがあります。',
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('キャンセル')),
+        FilledButton(onPressed: _submit, child: const Text('次へ')),
+      ],
+    );
+  }
+}
+
+/// パスフレーズの変更（解除中なので、今のパスフレーズは聞かない）
+class _ChangePassphraseDialog extends StatefulWidget {
+  final CryptoService crypto;
+  const _ChangePassphraseDialog({required this.crypto});
+
+  @override
+  State<_ChangePassphraseDialog> createState() => _ChangePassphraseDialogState();
+}
+
+class _ChangePassphraseDialogState extends State<_ChangePassphraseDialog> {
+  final _pass = TextEditingController();
+  final _confirm = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _pass.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final error = _checkNewPassphrase(_pass.text, _confirm.text);
+    if (error != null) return setState(() => _error = error);
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    await _letSpinnerPaint();
+    try {
+      await widget.crypto.changePassphrase(_pass.text);
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('パスフレーズを変更'),
+      content: SizedBox(
+        width: 400,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          _PassphraseFields(
+              pass: _pass, confirm: _confirm, label: '新しい暗号化パスフレーズ', onSubmit: _submit),
+          _errorText(_error),
+        ]),
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+            child: const Text('キャンセル')),
+        FilledButton(onPressed: _busy ? null : _submit, child: _busyOr(_busy, const Text('変更'))),
       ],
     );
   }

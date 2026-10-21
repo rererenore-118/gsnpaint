@@ -222,8 +222,10 @@ class _AccountDialogState extends State<AccountDialog> {
 
 /// ログイン中のアカウント情報。メールアドレスが未確認なら確認メールの再送と確認状態の更新ができる。
 /// 閉じるときに、ログアウトが押されたら true を返す。
+/// onOpenCryptoSettings を渡すと、確認済みのアカウントに「暗号化の設定」ボタンを出す。
 class AccountInfoDialog extends StatefulWidget {
-  const AccountInfoDialog({super.key});
+  final VoidCallback? onOpenCryptoSettings;
+  const AccountInfoDialog({super.key, this.onOpenCryptoSettings});
 
   @override
   State<AccountInfoDialog> createState() => _AccountInfoDialogState();
@@ -295,13 +297,26 @@ class _AccountInfoDialogState extends State<AccountInfoDialog> {
             SelectableText(user?.email ?? '（メールアドレスなし）',
                 style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            if (verified)
+            if (verified) ...[
               const Row(children: [
                 Icon(Icons.verified, color: Colors.green, size: 18),
                 SizedBox(width: 4),
                 Text('メールアドレス確認済み'),
-              ])
-            else ...[
+              ]),
+              if (widget.onOpenCryptoSettings != null) ...[
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.lock_outline, size: 18),
+                  label: const Text('暗号化の設定（パスキー・パスフレーズ）'),
+                  onPressed: _busy
+                      ? null
+                      : () {
+                          Navigator.pop(context, false);
+                          widget.onOpenCryptoSettings!();
+                        },
+                ),
+              ],
+            ] else ...[
               const Row(children: [
                 Icon(Icons.mark_email_unread, color: Colors.orange, size: 18),
                 SizedBox(width: 4),

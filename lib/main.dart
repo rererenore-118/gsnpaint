@@ -1965,7 +1965,7 @@ class _GsnEditorState extends State<GsnEditor> {
   Future<void> _showAccountInfo() async {
     final signOut = await showDialog<bool>(
       context: context,
-      builder: (ctx) => const AccountInfoDialog(),
+      builder: (ctx) => AccountInfoDialog(onOpenCryptoSettings: _openCryptoSettings),
     );
     if (signOut == true) {
       await _crypto.lock();
@@ -1984,6 +1984,15 @@ class _GsnEditorState extends State<GsnEditor> {
 
   /// アカウントの図・CSVを使える状態にする（初回は暗号化の設定、2回目以降はパスフレーズでの解除）
   Future<bool> _ensureUnlocked() => ensureUnlocked(context, _crypto);
+
+  /// 暗号化の設定（パスキーの登録・削除、パスフレーズの変更）。先に解除してから開く
+  Future<void> _openCryptoSettings() async {
+    if (!await _ensureUnlocked() || !mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => CryptoSettingsDialog(crypto: _crypto),
+    );
+  }
 
   /// 名前を聞いてアカウントに保存する。同名の図があれば上書きを確認する。
   Future<void> _saveToCloud() async {

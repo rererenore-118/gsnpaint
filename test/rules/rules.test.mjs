@@ -95,3 +95,14 @@ test("決められた場所以外には書けない", async () => {
   await assertFails(setDoc(doc(db(ALICE), `users/${ALICE}/other/x`), item));
   await assertFails(setDoc(doc(db(ALICE), `users/${ALICE}`), { a: 1 }));
 });
+
+test("鍵の情報: パスキーを10件まで足せる。11件以上は書けない", async () => {
+  const k = await keyringFor(ALICE);
+  const ref = doc(db(ALICE), `users/${ALICE}/crypto/keyring`);
+  await assertSucceeds(setDoc(ref, { ...k, createdAt: serverTimestamp() }));
+  const entry = { prfSalt: "c2FsdA==", iv: "aXY=", wrappedMk: "bWs=", label: "x", createdAt: "2026-10-21T00:00:00Z" };
+  const many = (n) => Object.fromEntries([...Array(n)].map((_, i) => [`cred${i}`, entry]));
+  await assertSucceeds(updateDoc(ref, { passkeys: many(10), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { passkeys: many(11), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { passkeys: "not a map" }));
+});

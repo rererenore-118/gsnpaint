@@ -4,7 +4,8 @@
 // このクラスは鍵の情報（keyring）の読み書きと、解除の状態を受け持つ。
 //
 // 保存先: users/{uid}/crypto/keyring
-//   v, pass{kdf,salt,iter,iv,wrappedMk}, recovery{kdf,salt,iv,wrappedMk}, createdAt, updatedAt
+//   v, pass{kdf,salt,iter,iv,wrappedMk}, recovery{kdf,salt,iv,wrappedMk},
+//   passkeys{<パスキーのID>: {prfSalt,iv,wrappedMk,label,createdAt}}, createdAt, updatedAt
 // 暗号化した1件（図・CSV）: v, wrappedDek{iv,ct}, iv, ct, updatedAt
 
 import 'dart:convert';
@@ -24,6 +25,10 @@ extension type _GsnCrypto._(JSObject _) implements JSObject {
       JSString uid, JSString keyringJson, JSString recoveryKey);
   external JSPromise<JSString> rewrapPassphrase(
       JSString uid, JSString keyringJson, JSString newPassphrase);
+  external JSPromise<JSString> passkeySupported();
+  external JSPromise<JSString> registerPasskey(
+      JSString uid, JSString keyringJson, JSString userName, JSString label);
+  external JSPromise<JSString> unlockWithPasskey(JSString uid, JSString keyringJson);
   external JSPromise<JSString> lock();
   external JSPromise<JSString> encryptItem(
       JSString uid, JSString collection, JSString docId, JSString plaintext);
@@ -40,6 +45,14 @@ class CryptoException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// 登録済みのパスキー
+class PasskeyInfo {
+  final String id;
+  final String label;
+  final DateTime? createdAt;
+  const PasskeyInfo(this.id, this.label, this.createdAt);
 }
 
 /// 暗号化されていない（暗号化機能より前に保存された）1件
@@ -101,8 +114,12 @@ class CryptoService {
   }
 
   /// 鍵の情報を JSON にする（Firestore の日時など、暗号に関係ない項目は除く）
-  static String _keyringJson(Map<String, dynamic> data) =>
-      jsonEncode({'v': data['v'], 'pass': data['pass'], 'recovery': data['recovery']});
+  static String _keyringJson(Map<String, dynamic> data) => jsonEncode({
+        'v': data['v'],
+        'pass': data['pass'],
+        'recovery': data['recovery'],
+        if (data['passkeys'] != null) 'passkeys': data['passkeys'],
+      });
 
   /// 鍵の情報があるか（初回設定が済んでいるか）
   Future<bool> hasKeyring() async => (await _keyringRef.get()).exists;
@@ -162,6 +179,58 @@ class CryptoService {
             _js.rewrapPassphrase(uid.toJS, _keyringJson(keyring).toJS, newPassphrase.toJS))
         as String) as Map<String, dynamic>;
     await _keyringRef.update({'pass': updated['pass'], 'updatedAt': FieldValue.serverTimestamp()});
+  }
+
+  // ---- パスキー ----
+
+  /// このブラウザでパスキーによる解除（WebAuthn の PRF 拡張）を使えそうか
+  static Future<bool> passkeySupported() async {
+    final js = _gsnCrypto;
+    if (js == null) return false;
+    try {
+      return await _call(js.passkeySupported()) == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 登録済みのパスキー（新しい順）
+  Future<List<PasskeyInfo>> listPasskeys() async {
+    final data = (await _keyringRef.get()).data();
+    final passkeys = (data?['passkeys'] as Map<String, dynamic>?) ?? {};
+    return passkeys.entries.map((e) {
+      final v = e.value as Map<String, dynamic>;
+      return PasskeyInfo(e.key, v['label'] as String? ?? 'パスキー',
+          DateTime.tryParse(v['createdAt'] as String? ?? ''));
+    }).toList()
+      ..sort((a, b) => (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)));
+  }
+
+  /// パスキーを作って登録する（解除中のみ）。端末のパスキーの確認が2回出ることがある。
+  Future<void> registerPasskey(String label) async {
+    final uid = _uid;
+    final keyring = await _loadKeyring();
+    final email = FirebaseAuth.instance.currentUser?.email ?? uid;
+    final updated = jsonDecode(await _call(_js.registerPasskey(
+            uid.toJS, _keyringJson(keyring).toJS, email.toJS, label.toJS)) as String)
+        as Map<String, dynamic>;
+    await _keyringRef
+        .update({'passkeys': updated['passkeys'], 'updatedAt': FieldValue.serverTimestamp()});
+  }
+
+  /// 登録済みのパスキーで解除する
+  Future<void> unlockWithPasskey() async {
+    final uid = _uid;
+    final keyring = await _loadKeyring();
+    await _call(_js.unlockWithPasskey(uid.toJS, _keyringJson(keyring).toJS));
+    _unlockedUid = uid;
+  }
+
+  /// パスキーの登録を外す（端末側のパスキー自体は、端末の設定から消してもらう）
+  Future<void> removePasskey(String id) async {
+    final keyring = await _loadKeyring();
+    final passkeys = Map<String, dynamic>.from(keyring['passkeys'] as Map? ?? {})..remove(id);
+    await _keyringRef.update({'passkeys': passkeys, 'updatedAt': FieldValue.serverTimestamp()});
   }
 
   /// 鍵を忘れる（ログアウト・アカウントの切り替え時）

@@ -53,12 +53,19 @@ service cloud.firestore {
           && isB64(r.salt, 64) && isB64(r.iv, 32) && isB64(r.wrappedMk, 128);
     }
 
+    // パスキーで包んだ主鍵（パスキーの ID → {prfSalt, iv, wrappedMk, label, createdAt}）。
+    // ルールでは map の中身を1件ずつ調べられないので、件数だけ制限する。
+    function isPasskeys(p) {
+      return p is map && p.size() <= 10;
+    }
+
     function isKeyring(k) {
-      return k.keys().hasOnly(['v', 'pass', 'recovery', 'createdAt', 'updatedAt'])
+      return k.keys().hasOnly(['v', 'pass', 'recovery', 'passkeys', 'createdAt', 'updatedAt'])
           && k.keys().hasAll(['v', 'pass', 'recovery', 'createdAt'])
           && k.v == 1
           && isPassWrap(k.pass)
           && isRecoveryWrap(k.recovery)
+          && (!('passkeys' in k) || isPasskeys(k.passkeys))
           && k.createdAt is timestamp
           && (!('updatedAt' in k) || k.updatedAt is timestamp);
     }
@@ -69,7 +76,7 @@ service cloud.firestore {
       allow create: if isOwner(uid)
                     && isKeyring(request.resource.data)
                     && request.resource.data.createdAt == request.time;
-      // 変えてよいのはパスフレーズで包んだ側だけ（回復キーで包んだ側と作成日時はそのまま）
+      // 変えてよいのはパスフレーズ・パスキーで包んだ側だけ（回復キーで包んだ側と作成日時はそのまま）
       allow update: if isOwner(uid)
                     && isKeyring(request.resource.data)
                     && request.resource.data.recovery == resource.data.recovery
