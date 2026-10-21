@@ -12,11 +12,16 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'crypto_service.dart';
 
-class _CsvEntry {
+/// アカウントに保存したCSV1件（復号したもの）
+class CloudCsvFile {
   final String id;
   final String name;
   final String content;
-  const _CsvEntry(this.id, this.name, this.content);
+  final DateTime? updatedAt;
+  const CloudCsvFile(this.id, this.name, this.content, this.updatedAt);
+
+  /// UTF-8 でのバイト数
+  int get sizeBytes => utf8.encode(content).length;
 }
 
 class CloudCsvService {
@@ -30,16 +35,22 @@ class CloudCsvService {
 
   CollectionReference<Map<String, dynamic>> _csvFiles() => _crypto.collection(_collection);
 
-  /// 自分のCSVをすべて復号して返す（復号できないものは除く）
-  Future<List<_CsvEntry>> _entries() async {
+  /// 自分のCSVをすべて復号して返す（名前順。復号できないものは除く）
+  Future<List<CloudCsvFile>> list() async => (await _entries())..sort((a, b) => a.name.compareTo(b.name));
+
+  /// CSVを削除する
+  Future<void> delete(String id) => _csvFiles().doc(id).delete();
+
+  Future<List<CloudCsvFile>> _entries() async {
     final snap = await _csvFiles().get();
-    final result = <_CsvEntry>[];
+    final result = <CloudCsvFile>[];
     for (final d in snap.docs) {
       if (!CryptoService.isEncrypted(d.data())) continue;
       try {
         final plain = jsonDecode(await _crypto.decrypt(_collection, d.id, d.data()))
             as Map<String, dynamic>;
-        result.add(_CsvEntry(d.id, plain['name'] as String, plain['content'] as String));
+        result.add(CloudCsvFile(d.id, plain['name'] as String, plain['content'] as String,
+            (d.data()['updatedAt'] as Timestamp?)?.toDate()));
       } on CryptoException {
         // 改ざん・破損したデータは使わない
       }

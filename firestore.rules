@@ -83,6 +83,12 @@ service cloud.firestore {
                     && request.resource.data.createdAt == resource.data.createdAt;
     }
 
+    // 図の過去の版。上書き保存のときに作られ、あとから書き換えることはない（作成と削除だけ）
+    match /users/{uid}/diagrams/{docId}/versions/{versionId} {
+      allow read, delete: if isOwner(uid);
+      allow create: if isOwner(uid) && isEncryptedItem(request.resource.data);
+    }
+
     // 図・CSV
     match /users/{uid}/{collection}/{docId} {
       allow read, delete: if isOwner(uid) && collection in ['diagrams', 'csvFiles'];

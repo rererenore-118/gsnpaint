@@ -23,6 +23,7 @@ import 'account_dialog.dart';
 import 'cloud_diagram_dialogs.dart';
 import 'cloud_diagram_service.dart';
 import 'cloud_csv_service.dart';
+import 'cloud_csv_dialogs.dart';
 import 'crypto_dialogs.dart';
 import 'crypto_service.dart';
 import 'browser_eval.dart';
@@ -1335,6 +1336,12 @@ class _GsnEditorState extends State<GsnEditor> {
             tooltip: 'CSVをアカウントにアップロード',
             onPressed: _uploadCsv,
           ),
+          if (_cloudReady)
+            IconButton(
+              icon: const Icon(Icons.table_chart_outlined),
+              tooltip: 'アカウントのCSVを管理',
+              onPressed: _openCsvManager,
+            ),
           IconButton(
             icon: const Icon(Icons.account_tree),
             tooltip: '自動レイアウト',
@@ -1843,6 +1850,19 @@ class _GsnEditorState extends State<GsnEditor> {
     });
   }
 
+  /// アカウントのCSVの一覧（中身の確認・削除）
+  Future<void> _openCsvManager() async {
+    if (!await _ensureUnlocked() || !mounted) return;
+    final usedNames = _nodes
+        .where((n) => n.type == GsnNodeType.fileList)
+        .map((n) => n.label.trim())
+        .toSet();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => CsvManagerDialog(service: _csvService, usedNames: usedNames),
+    );
+  }
+
   /// アカウントのCSVから1つ選んで FileList ノードを置く
   Future<void> _addFileListNode(Offset position) async {
     if (_cloudBlockedReason != null) {
@@ -2049,14 +2069,18 @@ class _GsnEditorState extends State<GsnEditor> {
   /// 自分の図の一覧から選んで開く（一覧から削除もできる）
   Future<void> _openFromCloud() async {
     if (!await _ensureUnlocked() || !mounted) return;
-    final selected = await showDialog<CloudDiagram>(
+    final result = await showDialog<CloudOpenResult>(
       context: context,
       builder: (ctx) => CloudOpenDialog(service: _cloudService),
     );
-    if (selected == null) return;
+    if (result == null) return;
+    final selected = result.diagram;
+    final version = result.version;
 
     try {
-      final data = jsonDecode(await _cloudService.load(selected.id));
+      final data = jsonDecode(version == null
+          ? await _cloudService.load(selected.id)
+          : await _cloudService.loadVersion(selected.id, version.id));
       _saveToHistory(); // 開く前の図に Undo で戻れるようにする
       setState(() {
         _nodes.clear();
@@ -2069,7 +2093,10 @@ class _GsnEditorState extends State<GsnEditor> {
       _cloudDiagramName = selected.name;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('「${selected.name}」を開きました。')),
+          SnackBar(
+              content: Text(version == null
+                  ? '「${selected.name}」を開きました。'
+                  : '「${selected.name}」の過去の版を開きました。保存すると最新の版になります。')),
         );
       }
     } catch (e) {

@@ -92,6 +92,8 @@ class CryptoService {
   CollectionReference<Map<String, dynamic>> collection(String name) =>
       _db.collection('users').doc(_uid).collection(name);
 
+  WriteBatch batch() => _db.batch();
+
   /// いまのアカウントの鍵が解除されているか
   bool get isUnlocked =>
       _unlockedUid != null && _unlockedUid == FirebaseAuth.instance.currentUser?.uid;
@@ -290,6 +292,12 @@ class CryptoService {
     for (final col in collections) {
       final snap = await collection(col).get();
       for (final d in snap.docs) {
+        // 図の過去の版（サブコレクション）は親を消しても残るので、先に消す
+        if (col == 'diagrams') {
+          for (final v in (await d.reference.collection('versions').get()).docs) {
+            await v.reference.delete();
+          }
+        }
         await d.reference.delete();
       }
     }

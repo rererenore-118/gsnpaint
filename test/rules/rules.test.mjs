@@ -106,3 +106,18 @@ test("鍵の情報: パスキーを10件まで足せる。11件以上は書け�
   await assertFails(updateDoc(ref, { passkeys: many(11), updatedAt: serverTimestamp() }));
   await assertFails(updateDoc(ref, { passkeys: "not a map" }));
 });
+
+test("図の過去の版: 暗号化した形で本人だけが作れる。書き換えはできない", async () => {
+  await keyringFor(ALICE);
+  const path = `users/${ALICE}/diagrams/d1/versions/v1`;
+  const item = await encryptedItem(ALICE, "diagrams/d1/versions", "v1");
+  await assertFails(setDoc(doc(db(BOB), path), item));
+  await assertFails(setDoc(doc(db(ALICE), path), { name: "図", content: "{}", updatedAt: serverTimestamp() }));
+  await assertSucceeds(setDoc(doc(db(ALICE), path), item));
+  await assertFails(setDoc(doc(db(ALICE), path), await encryptedItem(ALICE, "diagrams/d1/versions", "v1")));
+  await assertFails(getDoc(doc(db(BOB), path)));
+  await assertSucceeds(getDoc(doc(db(ALICE), path)));
+  await assertSucceeds(deleteDoc(doc(db(ALICE), path)));
+  // CSV の下には版を作れない
+  await assertFails(setDoc(doc(db(ALICE), `users/${ALICE}/csvFiles/c1/versions/v1`), item));
+});
