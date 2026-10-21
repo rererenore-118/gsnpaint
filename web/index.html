@@ -50,6 +50,8 @@
   </script>
   <!-- ブラウザ内評価（Pyodide）の窓口。評価ボタンを押すまで Python は読み込まない -->
   <script src="pgsn/pgsn_eval.js"></script>
+  <!-- アカウントに保存する図・CSVの暗号化（WebCrypto）。window.gsnCrypto -->
+  <script type="module" src="crypto/gsn_crypto.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

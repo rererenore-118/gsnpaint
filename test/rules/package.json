@@ -1,0 +1,13 @@
+{
+  "name": "gsnpaint-rules-test",
+  "private": true,
+  "description": "firestore.rules のテスト（Firestore エミュレータで動かす）",
+  "type": "module",
+  "scripts": {
+    "test": "firebase emulators:exec --only firestore --project demo-gsnpaint \"node --test rules.test.mjs\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "firebase": "^13.0.0"
+  }
+}

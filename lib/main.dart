@@ -23,6 +23,8 @@ import 'account_dialog.dart';
 import 'cloud_diagram_dialogs.dart';
 import 'cloud_diagram_service.dart';
 import 'cloud_csv_service.dart';
+import 'crypto_dialogs.dart';
+import 'crypto_service.dart';
 import 'browser_eval.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
@@ -348,10 +350,12 @@ class _GsnEditorState extends State<GsnEditor> {
     return null;
   }
 
-  // アカウント（Firestore）への図の保存・読み出し
-  final CloudDiagramService _cloudService = CloudDiagramService();
-  // アカウント（Firestore）に置くCSV。FileListノードが参照する
-  final CloudCsvService _csvService = CloudCsvService();
+  // アカウントに置く図・CSVの暗号化（鍵の解除状態を持つ）。使う前に _ensureUnlocked() を呼ぶ
+  final CryptoService _crypto = CryptoService();
+  // アカウント（Firestore）への図の保存・読み出し（暗号化して保存する）
+  late final CloudDiagramService _cloudService = CloudDiagramService(_crypto);
+  // アカウント（Firestore）に置くCSV。FileListノードが参照する（暗号化して保存する）
+  late final CloudCsvService _csvService = CloudCsvService(_crypto);
   // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
   String _cloudDiagramName = 'gsn';
 
@@ -519,7 +523,11 @@ class _GsnEditorState extends State<GsnEditor> {
       if (mounted) {
         setState(() {
           // 別のアカウントに切り替わったら、前のアカウントの図の名前は引き継がない
-          if (user?.uid != _user?.uid) _cloudDiagramName = 'gsn';
+          if (user?.uid != _user?.uid) {
+            _cloudDiagramName = 'gsn';
+            // ログアウト・別のアカウントへの切り替えでは、前のアカウントの鍵を忘れる
+            _crypto.lock();
+          }
           _user = user;
         });
       }
@@ -568,6 +576,7 @@ class _GsnEditorState extends State<GsnEditor> {
             '$_cloudBlockedReason');
         return;
       }
+      if (!await _ensureUnlocked()) return;
       try {
         final contents = await _csvService.loadContents(csvNames);
         final missing = csvNames.where((n) => !contents.containsKey(n)).toList();
@@ -1800,6 +1809,7 @@ class _GsnEditorState extends State<GsnEditor> {
           return;
         }
 
+        if (!await _ensureUnlocked()) return;
         try {
           if (await _csvService.exists(file.name)) {
             if (!mounted) return;
@@ -1839,6 +1849,7 @@ class _GsnEditorState extends State<GsnEditor> {
       _showResultDialog('CSVファイルを使えません', _cloudBlockedReason!);
       return;
     }
+    if (!await _ensureUnlocked()) return;
     try {
       final files = await _csvService.listNames();
 
@@ -1957,6 +1968,7 @@ class _GsnEditorState extends State<GsnEditor> {
       builder: (ctx) => const AccountInfoDialog(),
     );
     if (signOut == true) {
+      await _crypto.lock();
       await FirebaseAuth.instance.signOut();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1970,8 +1982,12 @@ class _GsnEditorState extends State<GsnEditor> {
 
   // ---- アカウント（Firestore）への保存・読み出し ----
 
+  /// アカウントの図・CSVを使える状態にする（初回は暗号化の設定、2回目以降はパスフレーズでの解除）
+  Future<bool> _ensureUnlocked() => ensureUnlocked(context, _crypto);
+
   /// 名前を聞いてアカウントに保存する。同名の図があれば上書きを確認する。
   Future<void> _saveToCloud() async {
+    if (!await _ensureUnlocked() || !mounted) return;
     final name = await showDialog<String>(
       context: context,
       builder: (ctx) => CloudSaveDialog(initialName: _cloudDiagramName),
@@ -2023,6 +2039,7 @@ class _GsnEditorState extends State<GsnEditor> {
 
   /// 自分の図の一覧から選んで開く（一覧から削除もできる）
   Future<void> _openFromCloud() async {
+    if (!await _ensureUnlocked() || !mounted) return;
     final selected = await showDialog<CloudDiagram>(
       context: context,
       builder: (ctx) => CloudOpenDialog(service: _cloudService),

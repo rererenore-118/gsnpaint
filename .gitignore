@@ -46,3 +46,6 @@ app.*.map.json
 
 # Firebase Hosting のデプロイキャッシュ（生成物）
 .firebase/
+
+# ルールのテスト用の npm パッケージ
+node_modules/

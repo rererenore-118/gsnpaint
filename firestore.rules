@@ -1,14 +1,87 @@
 rules_version = '2';
 
-// エディタのアカウントごとのデータ（図・CSV）は users/{uid} 以下に置く。
+// エディタのアカウントごとのデータ（図・CSV・暗号化の鍵の情報）は users/{uid} 以下に置く。
 // ログインした本人（uid が一致する場合）で、かつメールアドレスを確認済みのアカウントだけが
 // 読み書きでき、それ以外はすべて拒否する（Google ログインは確認済みとして扱われる）。
+//
+// 図・CSVはブラウザ内で暗号化してから保存する（docs/encryption-design.md）。
+// ここでは暗号化した形（暗号文と包んだ鍵）だけを書き込めるようにし、平文の名前や本文は書かせない。
+// 暗号化機能より前の平文のデータは、読み出しと削除（暗号化して置き換えるため）だけを許す。
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null
-                         && request.auth.uid == uid
-                         && request.auth.token.email_verified == true;
+
+    function isOwner(uid) {
+      return request.auth != null
+          && request.auth.uid == uid
+          && request.auth.token.email_verified == true;
+    }
+
+    // Base64 の文字列（長さの上限つき）
+    function isB64(v, maxLen) {
+      return v is string && v.size() > 0 && v.size() <= maxLen;
+    }
+
+    function hasExactly(m, keys) {
+      return m is map && m.keys().hasOnly(keys) && m.keys().hasAll(keys);
+    }
+
+    // AES-GCM で暗号化した値（IV と暗号文）
+    function isSealed(m, maxLen) {
+      return hasExactly(m, ['iv', 'ct']) && isB64(m.iv, 32) && isB64(m.ct, maxLen);
+    }
+
+    // 暗号化した図・CSVの1件。暗号文は Firestore の1ドキュメントの上限（1MiB）に収まる大きさまで
+    function isEncryptedItem(d) {
+      return hasExactly(d, ['v', 'wrappedDek', 'iv', 'ct', 'updatedAt'])
+          && d.v == 1
+          && isSealed(d.wrappedDek, 128)
+          && isB64(d.iv, 32)
+          && isB64(d.ct, 1000000)
+          && d.updatedAt is timestamp;
+    }
+
+    function isPassWrap(p) {
+      return hasExactly(p, ['kdf', 'salt', 'iter', 'iv', 'wrappedMk'])
+          && p.kdf == 'PBKDF2-SHA256'
+          && p.iter is int && p.iter >= 600000
+          && isB64(p.salt, 64) && isB64(p.iv, 32) && isB64(p.wrappedMk, 128);
+    }
+
+    function isRecoveryWrap(r) {
+      return hasExactly(r, ['kdf', 'salt', 'iv', 'wrappedMk'])
+          && r.kdf == 'HKDF-SHA256'
+          && isB64(r.salt, 64) && isB64(r.iv, 32) && isB64(r.wrappedMk, 128);
+    }
+
+    function isKeyring(k) {
+      return k.keys().hasOnly(['v', 'pass', 'recovery', 'createdAt', 'updatedAt'])
+          && k.keys().hasAll(['v', 'pass', 'recovery', 'createdAt'])
+          && k.v == 1
+          && isPassWrap(k.pass)
+          && isRecoveryWrap(k.recovery)
+          && k.createdAt is timestamp
+          && (!('updatedAt' in k) || k.updatedAt is timestamp);
+    }
+
+    // 暗号化の鍵の情報（主鍵をパスフレーズと回復キーで包んだもの）
+    match /users/{uid}/crypto/keyring {
+      allow read, delete: if isOwner(uid);
+      allow create: if isOwner(uid)
+                    && isKeyring(request.resource.data)
+                    && request.resource.data.createdAt == request.time;
+      // 変えてよいのはパスフレーズで包んだ側だけ（回復キーで包んだ側と作成日時はそのまま）
+      allow update: if isOwner(uid)
+                    && isKeyring(request.resource.data)
+                    && request.resource.data.recovery == resource.data.recovery
+                    && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // 図・CSV
+    match /users/{uid}/{collection}/{docId} {
+      allow read, delete: if isOwner(uid) && collection in ['diagrams', 'csvFiles'];
+      allow create, update: if isOwner(uid)
+                            && collection in ['diagrams', 'csvFiles']
+                            && isEncryptedItem(request.resource.data);
     }
   }
 }

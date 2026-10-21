@@ -140,10 +140,13 @@ class _CloudOpenDialogState extends State<CloudOpenDialog> {
               itemBuilder: (context, i) {
                 final d = diagrams[i];
                 return ListTile(
-                  leading: const Icon(Icons.description_outlined),
+                  leading: Icon(d.unreadable ? Icons.warning_amber : Icons.description_outlined),
                   title: Text(d.name),
-                  subtitle: Text(_formatTime(d.updatedAt)),
-                  onTap: () => Navigator.of(context).pop(d),
+                  subtitle: Text(d.unreadable
+                      ? '${_formatTime(d.updatedAt)}  復号できません（壊れているか書き換えられています）'
+                      : _formatTime(d.updatedAt)),
+                  // 復号できないデータは開けない（削除だけできる）
+                  onTap: d.unreadable ? null : () => Navigator.of(context).pop(d),
                   trailing: IconButton(
                     icon: const Icon(Icons.delete_outline),
                     tooltip: '削除',
