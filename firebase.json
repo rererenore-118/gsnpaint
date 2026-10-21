@@ -37,6 +37,16 @@
             "value": "no-cache"
           }
         ]
+      },
+      {
+        "//": "ブラウザ内評価の一式（PGSN本体のzipなど）もファイル名が変わらないので、毎回再検証させる。",
+        "source": "/pgsn/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
       }
     ]
   },

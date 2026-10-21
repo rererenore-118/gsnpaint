@@ -1,5 +1,6 @@
 // GSNエディタのFlutterフロントエンド（Webアプリ）。
-// パレットからノードをドラッグして配置し、▶ボタンでFlaskサーバにPOSTしてPGSN評価結果をダイアログ表示する。
+// パレットからノードをドラッグして配置し、▶ボタンでPGSNの評価結果をダイアログ表示する
+// （評価はブラウザ内のPython＝Pyodideで行い、できないときはFlaskサーバにPOSTする）。
 // エディタ状態はブラウザのSharedPreferencesに自動保存される。
 
 import 'dart:async';
@@ -23,6 +24,7 @@ import 'account_dialog.dart';
 import 'cloud_diagram_dialogs.dart';
 import 'cloud_diagram_service.dart';
 import 'cloud_csv_service.dart';
+import 'browser_eval.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -31,6 +33,10 @@ part 'pdf_export.dart';
 // --dart-define=API_BASE=http://127.0.0.1:5000 を付けて起動する。
 const String _apiBase =
     String.fromEnvironment('API_BASE', defaultValue: 'https://pgsn-api.onrender.com');
+
+// 評価はブラウザ内（Pyodide）で行い、できないときだけ評価サーバを使う。
+// サーバだけで評価したいときは --dart-define=BROWSER_EVAL=false を付けて起動する。
+const bool _browserEvalEnabled = bool.fromEnvironment('BROWSER_EVAL', defaultValue: true);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -515,6 +521,8 @@ class _GsnEditorState extends State<GsnEditor> {
   void initState() {
     super.initState();
     _clearLocalStorage();
+    // 評価用の Python を裏で読み込んでおく（Web Worker で動くので画面は固まらない）
+    if (_browserEvalEnabled) BrowserEval.preload();
     // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る。
     // userChanges() はメールアドレスの確認状態が更新されたとき（reload 後）にも通知される。
     _authSub = FirebaseAuth.instance.userChanges().listen((user) {
@@ -585,43 +593,62 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     }
 
-    try {
-      // サーバーへ送信
-      final response = await http.post(
-        Uri.parse('$_apiBase/evaluate'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode(requestData),
-      );
+    final requestJson = jsonEncode(requestData);
+    Map<String, dynamic>? result;
 
-      if (response.statusCode == 200) {
-        final Map<String, dynamic> result = jsonDecode(utf8.decode(response.bodyBytes));
-
-        // ★ここが変更点: メイン変数は更新せず、一時的なリストを作成
-        final List<dynamic> nodeData = result['nodes'] ?? [];
-        final List<GsnNode> resultNodes = nodeData
-            .map((data) => GsnNode.fromJson(data))
-            .toList();
-
-        final List<dynamic> edgeData = result['edges'] ?? [];
-        final List<GsnEdge> resultEdges = edgeData
-          .map((data) => GsnEdge.fromJson(data))
-          .toList();
-        // ★ビューアをダイアログとして開く
-        if (mounted) {
-          showDialog(
-            context: context,
-            builder: (context) => GsnResultViewer(
-              nodes: resultNodes,
-              edges: resultEdges
-            ),
-          );
+    // まずブラウザ内（Pyodide）で評価する。読み込めないなどで評価できなければ、評価サーバに送る。
+    if (_browserEvalEnabled && BrowserEval.isAvailable) {
+      try {
+        final r = await BrowserEval.evaluate(requestJson);
+        debugPrint('ブラウザ内評価: ${r.evalMs.toStringAsFixed(1)} ms');
+        if (r.body['error'] != null) {
+          _showErrorDialog("評価エラー: ${r.body['error']}");
+          return;
         }
-
-      } else {
-        _showErrorDialog("評価エラー: ${response.statusCode}\n${response.body}");
+        result = r.body;
+      } catch (e) {
+        debugPrint('ブラウザ内評価に失敗したため、評価サーバで評価します: $e');
       }
-    } catch (e) {
-      _showErrorDialog("通信エラー: $e");
+    }
+
+    if (result == null) {
+      try {
+        // サーバーへ送信
+        final response = await http.post(
+          Uri.parse('$_apiBase/evaluate'),
+          headers: {"Content-Type": "application/json"},
+          body: requestJson,
+        );
+        if (response.statusCode != 200) {
+          _showErrorDialog("評価エラー: ${response.statusCode}\n${response.body}");
+          return;
+        }
+        result = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      } catch (e) {
+        _showErrorDialog("通信エラー: $e");
+        return;
+      }
+    }
+
+    // ★ここが変更点: メイン変数は更新せず、一時的なリストを作成
+    final List<dynamic> nodeData = result['nodes'] ?? [];
+    final List<GsnNode> resultNodes = nodeData
+        .map((data) => GsnNode.fromJson(data))
+        .toList();
+
+    final List<dynamic> edgeData = result['edges'] ?? [];
+    final List<GsnEdge> resultEdges = edgeData
+      .map((data) => GsnEdge.fromJson(data))
+      .toList();
+    // ★ビューアをダイアログとして開く
+    if (mounted) {
+      showDialog(
+        context: context,
+        builder: (context) => GsnResultViewer(
+          nodes: resultNodes,
+          edges: resultEdges
+        ),
+      );
     }
 
   }
@@ -1293,7 +1320,7 @@ class _GsnEditorState extends State<GsnEditor> {
            IconButton(
               onPressed: _evaluateGsn,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
-              tooltip: 'サーバーで評価'),
+              tooltip: '評価'),
           // ローカルファイルから読み込むボタン
           IconButton(
             onPressed: _importJson,

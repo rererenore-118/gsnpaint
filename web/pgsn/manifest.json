@@ -1,0 +1,11 @@
+{
+  "app": "pgsn_app.zip",
+  "wheels": [
+    "wheels/attrs-25.3.0-py3-none-any.whl",
+    "wheels/cattrs-25.1.1-py3-none-any.whl",
+    "wheels/graphviz-0.21-py3-none-any.whl",
+    "wheels/six-1.16.0-py2.py3-none-any.whl",
+    "wheels/treelib-1.8.0-py3-none-any.whl",
+    "wheels/typing_extensions-4.14.1-py3-none-any.whl"
+  ]
+}
