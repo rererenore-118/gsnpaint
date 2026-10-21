@@ -4,8 +4,7 @@
 //   name      : ファイル名（FileListノードの説明欄に書く名前。同じ名前なら上書き）
 //   content   : CSVのテキスト（UTF-8）
 //   updatedAt : 保存時刻（サーバ時刻）
-// 評価のときは、図の FileList ノードが使うCSVの中身をまとめて評価サーバに送る
-// （サーバ側にCSVは保存しない）。本人以外が読み書きできないことは firestore.rules で保証する。
+// 評価のときは、図の FileList ノードが使うCSVの中身をまとめてブラウザ内の評価に渡す。本人以外が読み書きできないことは firestore.rules で保証する。
 
 import 'dart:convert';
 

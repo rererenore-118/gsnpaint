@@ -1,6 +1,6 @@
 // GSNエディタのFlutterフロントエンド（Webアプリ）。
 // パレットからノードをドラッグして配置し、▶ボタンでPGSNの評価結果をダイアログ表示する
-// （評価はブラウザ内のPython＝Pyodideで行い、できないときはFlaskサーバにPOSTする）。
+// （評価はブラウザ内のPython＝Pyodideで行い、サーバは使わない）。
 // エディタ状態はブラウザのSharedPreferencesに自動保存される。
 
 import 'dart:async';
@@ -11,7 +11,6 @@ import 'dart:convert';
 import 'dart:html' as html;
 // dart:typed_data は package:flutter/services.dart が再エクスポートするため不要
 import 'dart:ui' as ui;
-import 'package:http/http.dart' as http;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,15 +27,6 @@ import 'browser_eval.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
-
-// 評価サーバ（Flask）のURL。手元のサーバで試すときは
-// --dart-define=API_BASE=http://127.0.0.1:5000 を付けて起動する。
-const String _apiBase =
-    String.fromEnvironment('API_BASE', defaultValue: 'https://pgsn-api.onrender.com');
-
-// 評価はブラウザ内（Pyodide）で行い、できないときだけ評価サーバを使う。
-// サーバだけで評価したいときは --dart-define=BROWSER_EVAL=false を付けて起動する。
-const bool _browserEvalEnabled = bool.fromEnvironment('BROWSER_EVAL', defaultValue: true);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,7 +50,7 @@ void main() async {
   ));
 }
 
-// Flaskサーバ側の gsn_type 文字列と1対1対応する（_gsnTypeName() で変換）。
+// 評価用Python（build_gsn.py）の gsn_type 文字列と1対1対応する（_gsnTypeName() で変換）。
 // goal〜evidence がGSNの基本要素、lambda〜x がPGSN拡張のDSL要素。
 enum GsnNodeType {
   goal,
@@ -193,7 +183,7 @@ class GsnNode {
         if (undeveloped) 'undeveloped': true,
       };
 
-  // Flaskサーバ（build_gsn.py）が期待する文字列と完全一致させる必要がある。
+  // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
     switch (t) {
       case GsnNodeType.goal:
@@ -522,7 +512,7 @@ class _GsnEditorState extends State<GsnEditor> {
     super.initState();
     _clearLocalStorage();
     // 評価用の Python を裏で読み込んでおく（Web Worker で動くので画面は固まらない）
-    if (_browserEvalEnabled) BrowserEval.preload();
+    BrowserEval.preload();
     // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る。
     // userChanges() はメールアドレスの確認状態が更新されたとき（reload 後）にも通知される。
     _authSub = FirebaseAuth.instance.userChanges().listen((user) {
@@ -567,7 +557,7 @@ class _GsnEditorState extends State<GsnEditor> {
     };
 
     // FileListノードが使うCSVは、アカウントから中身を読んで図と一緒に送る
-    // （評価サーバはCSVを保存しないため）。
+    // （ブラウザ内の評価用Pythonにはファイルとして置かず、中身を直接渡す）。
     final csvNames = _nodes
         .where((n) => n.type == GsnNodeType.fileList)
         .map((n) => n.label.trim())
@@ -593,41 +583,19 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     }
 
-    final requestJson = jsonEncode(requestData);
-    Map<String, dynamic>? result;
-
-    // まずブラウザ内（Pyodide）で評価する。読み込めないなどで評価できなければ、評価サーバに送る。
-    if (_browserEvalEnabled && BrowserEval.isAvailable) {
-      try {
-        final r = await BrowserEval.evaluate(requestJson);
-        debugPrint('ブラウザ内評価: ${r.evalMs.toStringAsFixed(1)} ms');
-        if (r.body['error'] != null) {
-          _showErrorDialog("評価エラー: ${r.body['error']}");
-          return;
-        }
-        result = r.body;
-      } catch (e) {
-        debugPrint('ブラウザ内評価に失敗したため、評価サーバで評価します: $e');
-      }
-    }
-
-    if (result == null) {
-      try {
-        // サーバーへ送信
-        final response = await http.post(
-          Uri.parse('$_apiBase/evaluate'),
-          headers: {"Content-Type": "application/json"},
-          body: requestJson,
-        );
-        if (response.statusCode != 200) {
-          _showErrorDialog("評価エラー: ${response.statusCode}\n${response.body}");
-          return;
-        }
-        result = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      } catch (e) {
-        _showErrorDialog("通信エラー: $e");
+    // ブラウザ内（Pyodide）で評価する
+    final Map<String, dynamic> result;
+    try {
+      final r = await BrowserEval.evaluate(jsonEncode(requestData));
+      debugPrint('ブラウザ内評価: ${r.evalMs.toStringAsFixed(1)} ms');
+      if (r.body['error'] != null) {
+        _showErrorDialog("評価エラー: ${r.body['error']}");
         return;
       }
+      result = r.body;
+    } catch (e) {
+      _showErrorDialog("評価の準備に失敗しました。ページを再読み込みしてもう一度お試しください。\n$e");
+      return;
     }
 
     // ★ここが変更点: メイン変数は更新せず、一時的なリストを作成
@@ -1819,7 +1787,7 @@ class _GsnEditorState extends State<GsnEditor> {
       final reader = html.FileReader();
 
       reader.onLoadEnd.listen((e) async {
-        // 評価サーバは UTF-8 として読むため、それ以外（Excel の Shift_JIS 保存など）はここで弾く
+        // 評価用Pythonは UTF-8 として読むため、それ以外（Excel の Shift_JIS 保存など）はここで弾く
         final String content;
         try {
           content = utf8
@@ -3131,7 +3099,7 @@ class DefeaterPainter extends CustomPainter {
 }
 
 // ★追加(PGSN v0.0.4): 未展開の印（GSN規格のUndeveloped）。ノード下辺の中央に上の頂点を接する小さな菱形。
-// サーバ(build_gsn.py)の UNDEVELOPED_MARKER_H と高さを揃えること。
+// 評価用Python(build_gsn.py)の UNDEVELOPED_MARKER_H と高さを揃えること。
 const Size _undevelopedMarkerSize = Size(20, 14);
 
 void _paintUndevelopedMarker(Canvas canvas, GsnNode node) {

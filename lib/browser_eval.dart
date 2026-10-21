@@ -1,5 +1,5 @@
 // ブラウザ内評価（Pyodide）を呼ぶ。
-// 実体は web/pgsn/pgsn_eval.js（window.pgsnEval）で、評価サーバと同じ Python のコード
+// 実体は web/pgsn/pgsn_eval.js（window.pgsnEval）で、評価用の Python のコード
 // （gsn_eval.py・build_gsn.py・PGSN）をブラウザ上で動かす。
 // 一式は flask リポジトリの tools/build_pyodide_bundle.py で web/pgsn/ に作る。
 
@@ -18,7 +18,7 @@ extension type _PgsnEval._(JSObject _) implements JSObject {
 class BrowserEvalResult {
   BrowserEvalResult(this.body, this.evalMs);
 
-  /// サーバの /evaluate の応答と同じ中身（形式の誤りは {"error": ...}）
+  /// 評価結果の図（nodes/edges）。形式の誤りは {"error": ...}
   final Map<String, dynamic> body;
 
   /// Python での評価にかかった時間（読み込み時間は含まない）
@@ -26,18 +26,15 @@ class BrowserEvalResult {
 }
 
 class BrowserEval {
-  /// index.html が pgsn_eval.js を読み込んでいれば使える
-  static bool get isAvailable => _pgsnEval != null;
-
   /// Pyodide とPGSNを先に読み込んでおく（最初の評価を待たせないため）。失敗しても無視する
-  /// （評価のときにもう一度読み込み、それでもだめならサーバで評価する）。
+  /// （評価のときにもう一度読み込む）。
   static void preload() {
     final eval = _pgsnEval;
     if (eval == null) return;
     eval.preload().toDart.then((_) {}, onError: (_) {});
   }
 
-  /// 評価する。Pyodide を読み込めないなど、ブラウザで評価できないときは例外を投げる。
+  /// 評価する。Pyodide を読み込めないなど、評価できないときは例外を投げる。
   static Future<BrowserEvalResult> evaluate(String requestJson) async {
     final eval = _pgsnEval;
     if (eval == null) throw StateError('ブラウザ内評価が読み込まれていません');

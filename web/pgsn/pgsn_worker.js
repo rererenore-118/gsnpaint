@@ -3,9 +3,10 @@
 // 画面とは別のスレッドで動くので、評価中もエディタの画面は固まらない。
 // モジュール形式の Worker として起動する（pgsn_eval.js の type: "module"）。
 
-import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.mjs";
+// Pyodide本体も同じサイトの pyodide/ に置いてあり、外部のサーバやCDNは使わない。
+import { loadPyodide } from "./pyodide/pyodide.mjs";
 
-const PYODIDE_BASE = "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/";
+const PYODIDE_BASE = new URL("./pyodide/", self.location).href;
 const APP_DIR = "/home/pyodide/pgsn_app";
 
 let ready = null;
