@@ -65,6 +65,7 @@ enum GsnNodeType {
   justification,
   defeater, // ★追加: Confidence Argument対応。GSNノードへの疑義(反論)を表すノード
             // （PGSN v0.0.4以降はGoal/Strategy/Evidence/Defeaterのどれにも付けられる）
+  awayGoal, // ★追加(GSN v3 モジュール拡張): 別のモジュールで論じられている主張を参照するゴール
   recordAccess,
   lambda,
   application,
@@ -147,6 +148,8 @@ class GsnNode {
   // ★追加(PGSN v0.0.4): 支持(support)が未展開であることを示す印。評価結果にだけ付く。
   // GSN規格どおり、独立したノードではなくこのノードの下辺に小さな菱形として描く。
   final bool undeveloped;
+  // ★追加(GSN v3 モジュール拡張): Away Goal が参照するモジュールの名前。Away Goal 以外では空。
+  String module;
 
   GsnNode({
     required this.id,
@@ -156,6 +159,7 @@ class GsnNode {
     this.height = 60,
     String? label,
     this.undeveloped = false,
+    this.module = '',
   }) : label = label ?? _gsnTypeName(type);
 
 
@@ -172,6 +176,7 @@ class GsnNode {
       height: json['height'] ?? 60,
       label: json['description'],
       undeveloped: json['undeveloped'] == true,
+      module: json['module'] ?? '',
     );
   }
 
@@ -184,6 +189,7 @@ class GsnNode {
         'width': width,
         'height': height,
         if (undeveloped) 'undeveloped': true,
+        if (module.isNotEmpty) 'module': module,
       };
 
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
@@ -205,6 +211,8 @@ class GsnNode {
         return 'Justification';
       case GsnNodeType.defeater: // ★追加(Defeater)
         return 'Defeater';
+      case GsnNodeType.awayGoal:
+        return 'AwayGoal';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -264,6 +272,7 @@ class _DiagramSnapshot {
                 height: n.height,
                 label: n.label,
                 undeveloped: n.undeveloped,
+                module: n.module,
               ))
           .toList(),
       edges: edges.map((e) => GsnEdge(e.fromId, e.toId)).toList(),
@@ -447,6 +456,7 @@ class _GsnEditorState extends State<GsnEditor> {
               width: n.width,
               height: n.height,
               label: n.label,
+              module: n.module,
             ))
         .toList();
     // 選択ノード間のエッジも保持
@@ -478,6 +488,7 @@ class _GsnEditorState extends State<GsnEditor> {
         width: n.width,
         height: n.height,
         label: n.label,
+        module: n.module,
       ));
     }
     final newEdges = _clipboardEdges
@@ -561,6 +572,7 @@ class _GsnEditorState extends State<GsnEditor> {
         "position_y": n.position.dy,
         "width": n.width,
         "height": n.height,
+        if (n.module.isNotEmpty) "module": n.module,
       }).toList(),
       "edges":_edges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
     };
@@ -1762,6 +1774,10 @@ class _GsnEditorState extends State<GsnEditor> {
 
 
   void _editLabel(GsnNode node) {
+    if (node.type == GsnNodeType.awayGoal) {
+      _editAwayGoal(node);
+      return;
+    }
     final ctl = TextEditingController(text: node.label);
 
     // ダイアログで使う関数を先に定義する
@@ -1792,6 +1808,56 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
+
+  // ★追加(GSN v3 モジュール拡張): Away Goal は主張と参照先のモジュール名を一緒に編集する
+  void _editAwayGoal(GsnNode node) {
+    final claimCtl = TextEditingController(text: node.label);
+    final moduleCtl = TextEditingController(text: node.module);
+
+    void submit() {
+      if (claimCtl.text.isNotEmpty) {
+        _saveToHistory();
+        setState(() {
+          node.label = claimCtl.text;
+          node.module = moduleCtl.text.trim();
+        });
+        _saveToLocalStorage();
+      }
+      Navigator.pop(context);
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Away Goal の編集'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: claimCtl,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: '主張（参照先のゴールと同じ文面）'),
+              onSubmitted: (_) => submit(),
+            ),
+            TextField(
+              controller: moduleCtl,
+              decoration: const InputDecoration(labelText: '参照先のモジュール名'),
+              onSubmitted: (_) => submit(),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('キャンセル')),
+          TextButton(
+            onPressed: submit,
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
 
   /// CSVを選んでアカウント（Firestore）に保存する。同じ名前のCSVがあれば上書きを確認する。
   Future<void> _uploadCsv() async {
@@ -2225,6 +2291,13 @@ Widget _buildGsnShapeWidget(GsnNode node,
     case GsnNodeType.defeater: // ★変更(Dialectic): defeaterBackedでdefeated/inDoubtの見た目を切り替える
       return buildPainter(DefeaterPainter(backed: defeaterBacked));
 
+    case GsnNodeType.awayGoal: // 主張は帯の上の部分に描くので、Painterにラベルごと渡す
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: AwayGoalPainter(
+            label: node.label, module: node.module, isPalette: isPalette),
+      );
+
     case GsnNodeType.x:
       return buildPainter(XPainter());
 
@@ -2284,6 +2357,7 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.assumption,
         GsnNodeType.justification,
         GsnNodeType.defeater, // ★追加(Defeater)
+        GsnNodeType.awayGoal,
       ],
     ),
     _PaletteGroup(
@@ -3178,6 +3252,7 @@ const Set<GsnNodeType> _gsnElementTypes = {
   GsnNodeType.assumption,
   GsnNodeType.justification,
   GsnNodeType.defeater,
+  GsnNodeType.awayGoal,
 };
 
 bool _isUninstantiated(GsnNode node) =>
@@ -3245,6 +3320,84 @@ class _NodeMarkerPainter extends CustomPainter {
   // エディタではノードのリストを使い回したまま説明文や位置だけが変わるので、毎回描き直す
   @override
   bool shouldRepaint(covariant _NodeMarkerPainter oldDelegate) => true;
+}
+
+// ★追加(GSN v3 モジュール拡張): Away Goal。Goal と同じ長方形の下部に帯を付け、
+// 帯にモジュールの印と参照先のモジュール名を書く。主張は帯より上の部分の中央に描く。
+class AwayGoalPainter extends CustomPainter {
+  final String label;
+  final String module;
+  final bool isPalette;
+  AwayGoalPainter(
+      {required this.label, required this.module, this.isPalette = false});
+
+  static const double bandHeight = 18;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final band = min(bandHeight, size.height / 2);
+    final body = Rect.fromLTWH(0, 0, size.width, size.height - band);
+    final bandRect = Rect.fromLTWH(0, size.height - band, size.width, band);
+    final border = Paint()
+      ..color = Colors.black
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+
+    canvas.drawRect(body, Paint()..color = Colors.lightBlue.shade100);
+    canvas.drawRect(bandRect, Paint()..color = Colors.grey.shade200);
+    canvas.drawRect(Offset.zero & size, border);
+    canvas.drawLine(bandRect.topLeft, bandRect.topRight, border);
+
+    // モジュールの印（タブ付きの小さな箱）
+    final iconTop = bandRect.top + (band - 8) / 2;
+    final iconPaint = Paint()
+      ..color = Colors.black54
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    canvas.drawRect(Rect.fromLTWH(6, iconTop + 2, 10, 6), iconPaint);
+    canvas.drawRect(Rect.fromLTWH(6, iconTop, 4, 2), iconPaint);
+
+    if (!isPalette) {
+      final moduleTp = TextPainter(
+        text: TextSpan(
+          text: module.isEmpty ? 'モジュール未設定' : module,
+          style: TextStyle(
+              fontSize: 10,
+              color: module.isEmpty ? Colors.black38 : Colors.black87),
+        ),
+        maxLines: 1,
+        ellipsis: '…',
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: max(0.0, size.width - 26));
+      moduleTp.paint(canvas,
+          Offset(20, bandRect.top + (band - moduleTp.height) / 2));
+    }
+
+    if (label.isNotEmpty) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+              fontSize: isPalette ? 10 : 12,
+              fontWeight: FontWeight.bold,
+              color: Colors.black),
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: max(0.0, size.width - 16));
+      canvas.save();
+      canvas.clipRect(body);
+      tp.paint(canvas,
+          Offset((size.width - tp.width) / 2, (body.height - tp.height) / 2));
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant AwayGoalPainter oldDelegate) =>
+      oldDelegate.label != label ||
+      oldDelegate.module != module ||
+      oldDelegate.isPalette != isPalette;
 }
 
 class UndevelopedPainter extends CustomPainter {
