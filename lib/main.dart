@@ -1683,6 +1683,14 @@ class _GsnEditorState extends State<GsnEditor> {
                             ),
                           );
                         }),
+                        // ★追加(GSN v3 パターン拡張): "{変数}" を含む要素に未具体化の印を重ねる
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _NodeMarkerPainter(visibleNodes),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                     ),
@@ -3155,8 +3163,59 @@ class DefeaterPainter extends CustomPainter {
 // 評価用Python(build_gsn.py)の UNDEVELOPED_MARKER_H と高さを揃えること。
 const Size _undevelopedMarkerSize = Size(20, 14);
 
-void _paintUndevelopedMarker(Canvas canvas, GsnNode node) {
-  final top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
+// ★追加(GSN v3 パターン拡張): 未具体化の印（Uninstantiated）。ノード下辺の中央に上の頂点を接する白抜きの三角。
+// PGSNでは説明文の "{変数名}" が評価時に置き換わる（build_gsn.py の process_description）ので、
+// GSNの要素のうち説明文に "{...}" を含むものを「未具体化」とみなして印を付ける。
+// 評価結果に印が残っていれば、値が渡されず置き換わらなかったことを表す。
+const Size _uninstantiatedMarkerSize = Size(16, 12);
+final RegExp _placeholderPattern = RegExp(r'\{[^{}]+\}');
+const Set<GsnNodeType> _gsnElementTypes = {
+  GsnNodeType.goal,
+  GsnNodeType.strategy,
+  GsnNodeType.evidence,
+  GsnNodeType.context,
+  GsnNodeType.assumption,
+  GsnNodeType.justification,
+  GsnNodeType.defeater,
+};
+
+bool _isUninstantiated(GsnNode node) =>
+    _gsnElementTypes.contains(node.type) && _placeholderPattern.hasMatch(node.label);
+
+// ノード下辺から下に描く印の高さの合計（PDFの外接矩形の計算に使う）
+double _nodeMarkersHeight(GsnNode node) =>
+    (_isUninstantiated(node) ? _uninstantiatedMarkerSize.height : 0) +
+    (node.undeveloped ? _undevelopedMarkerSize.height : 0);
+
+final Paint _markerFillPaint = Paint()..color = Colors.white;
+final Paint _markerStrokePaint = Paint()
+  ..color = Colors.black
+  ..strokeWidth = 1.5
+  ..style = PaintingStyle.stroke;
+
+// 印を上下に並べて描く: 下辺のすぐ下に未具体化の三角、その下に未展開の菱形（両方付くとき）
+void _paintNodeMarkers(Canvas canvas, GsnNode node) {
+  var top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
+  if (_isUninstantiated(node)) {
+    _paintUninstantiatedMarker(canvas, top);
+    top = top.translate(0, _uninstantiatedMarkerSize.height);
+  }
+  if (node.undeveloped) _paintUndevelopedMarker(canvas, top);
+}
+
+void _paintUninstantiatedMarker(Canvas canvas, Offset top) {
+  final w = _uninstantiatedMarkerSize.width / 2;
+  final h = _uninstantiatedMarkerSize.height;
+  final path = Path()
+    ..moveTo(top.dx, top.dy)
+    ..lineTo(top.dx + w, top.dy + h)
+    ..lineTo(top.dx - w, top.dy + h)
+    ..close();
+  canvas.drawPath(path, _markerFillPaint);
+  canvas.drawPath(path, _markerStrokePaint);
+}
+
+void _paintUndevelopedMarker(Canvas canvas, Offset top) {
   final w = _undevelopedMarkerSize.width / 2;
   final h = _undevelopedMarkerSize.height;
   final path = Path()
@@ -3165,30 +3224,25 @@ void _paintUndevelopedMarker(Canvas canvas, GsnNode node) {
     ..lineTo(top.dx, top.dy + h)
     ..lineTo(top.dx - w, top.dy + h / 2)
     ..close();
-  canvas.drawPath(path, Paint()..color = Colors.white);
-  canvas.drawPath(
-      path,
-      Paint()
-        ..color = Colors.black
-        ..strokeWidth = 1.5
-        ..style = PaintingStyle.stroke);
+  canvas.drawPath(path, _markerFillPaint);
+  canvas.drawPath(path, _markerStrokePaint);
 }
 
-// 評価結果ビューアで、ノードの上に未展開の印を重ねて描く
-class _UndevelopedMarkerPainter extends CustomPainter {
+// ノードの上に未具体化・未展開の印を重ねて描く（エディタと評価結果ビューアで共用）
+class _NodeMarkerPainter extends CustomPainter {
   final List<GsnNode> nodes;
-  _UndevelopedMarkerPainter(this.nodes);
+  _NodeMarkerPainter(this.nodes);
 
   @override
   void paint(Canvas canvas, Size size) {
     for (final n in nodes) {
-      if (n.undeveloped) _paintUndevelopedMarker(canvas, n);
+      _paintNodeMarkers(canvas, n);
     }
   }
 
+  // エディタではノードのリストを使い回したまま説明文や位置だけが変わるので、毎回描き直す
   @override
-  bool shouldRepaint(covariant _UndevelopedMarkerPainter oldDelegate) =>
-      oldDelegate.nodes != nodes;
+  bool shouldRepaint(covariant _NodeMarkerPainter oldDelegate) => true;
 }
 
 class UndevelopedPainter extends CustomPainter {
@@ -3651,11 +3705,11 @@ class GsnResultViewer extends StatelessWidget {
                         ),
                       );
                     }).toList(),
-                    // ★追加(PGSN v0.0.4): 未展開の印をノードの下辺に重ねる
+                    // ★追加(PGSN v0.0.4): 未展開・未具体化の印をノードの下辺に重ねる
                     IgnorePointer(
                       child: CustomPaint(
                         size: Size(canvasWidth, canvasHeight),
-                        painter: _UndevelopedMarkerPainter(nodes),
+                        painter: _NodeMarkerPainter(nodes),
                       ),
                     ),
                   ],
