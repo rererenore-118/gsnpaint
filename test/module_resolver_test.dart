@@ -107,6 +107,11 @@ void main() {
     expect(edges.length, 4);
   });
 
+  test('公開ゴールの主張だけを一覧にする', () async {
+    expect(await resolver().publicClaims('SW'), ['SW は安全']);
+    expect(await resolver().publicClaims('無い図'), isNull);
+  });
+
   test('循環する参照は止める', () async {
     final nodes = [node(0, GsnNodeType.awayGoal, 'A は安全', module: 'A')];
     final merged = await resolver().inlineAll(nodes, []);

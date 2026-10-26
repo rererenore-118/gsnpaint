@@ -392,6 +392,9 @@ class _GsnEditorState extends State<GsnEditor> {
   late final CloudCsvService _csvService = CloudCsvService(_crypto);
   // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
   String _cloudDiagramName = 'gsn';
+  // 今編集しているアカウントの図（開いた・保存した図の名前）。「上書き保存」の保存先。
+  // ローカルJSONの読み込み・リセット・アカウントの切り替えで外す（別の図を上書きしないように）。
+  String? _openCloudName;
 
   Offset _snapToGrid(Offset pos) {
     if (!_gridSnapEnabled) return pos;
@@ -563,6 +566,7 @@ class _GsnEditorState extends State<GsnEditor> {
           // 別のアカウントに切り替わったら、前のアカウントの図の名前は引き継がない
           if (user?.uid != _user?.uid) {
             _cloudDiagramName = 'gsn';
+            _openCloudName = null;
             // ログアウト・別のアカウントへの切り替えでは、前のアカウントの鍵を忘れる
             _crypto.lock();
           }
@@ -766,6 +770,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _nodeCounter = 0;
         _connecting = null;
         _deleteMode = false;
+        _openCloudName = null;
       });
       _saveToLocalStorage();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1251,6 +1256,7 @@ class _GsnEditorState extends State<GsnEditor> {
             _edges.clear();
             _nodes.addAll(newNodes);
             _edges.addAll(newEdges);
+            _openCloudName = null;
 
             // ノードカウンターの更新
             if (_nodes.isNotEmpty) {
@@ -1410,8 +1416,15 @@ class _GsnEditorState extends State<GsnEditor> {
           if (_cloudReady) ...[
             IconButton(
               icon: const Icon(Icons.save),
+              onPressed: _openCloudName == null ? null : _overwriteCloud,
+              tooltip: _openCloudName == null
+                  ? '上書き保存（アカウントから開いた図・保存した図に使えます）'
+                  : '上書き保存（「$_openCloudName」）',
+            ),
+            IconButton(
+              icon: const Icon(Icons.save_as),
               onPressed: _saveToCloud,
-              tooltip: 'アカウントに保存',
+              tooltip: '名前を付けてアカウントに保存',
             ),
             IconButton(
               icon: const Icon(Icons.folder_special),
@@ -1932,12 +1945,32 @@ class _GsnEditorState extends State<GsnEditor> {
             TextField(
               controller: claimCtl,
               autofocus: true,
-              decoration: const InputDecoration(labelText: '主張（参照先のゴールと同じ文面）'),
+              decoration: InputDecoration(
+                labelText: '主張（参照先のゴールと同じ文面）',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.list),
+                  tooltip: '参照先の公開ゴールから選ぶ',
+                  onPressed: () async {
+                    final claim = await _pickPublicClaim(moduleCtl.text.trim());
+                    if (claim != null) claimCtl.text = claim;
+                  },
+                ),
+              ),
               onSubmitted: (_) => submit(),
             ),
             TextField(
               controller: moduleCtl,
-              decoration: const InputDecoration(labelText: '参照先のモジュール名'),
+              decoration: InputDecoration(
+                labelText: '参照先のモジュール名',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.folder_special),
+                  tooltip: 'アカウントに保存した図から選ぶ',
+                  onPressed: () async {
+                    final name = await _pickModule();
+                    if (name != null) moduleCtl.text = name;
+                  },
+                ),
+              ),
               onSubmitted: (_) => submit(),
             ),
           ],
@@ -1951,6 +1984,68 @@ class _GsnEditorState extends State<GsnEditor> {
             child: const Text('保存'),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Away Goal の参照先にする図を、アカウントに保存した図の一覧から選ぶ
+  Future<String?> _pickModule() async {
+    if (_cloudBlockedReason != null) {
+      _showResultDialog('保存した図を選べません', _cloudBlockedReason!);
+      return null;
+    }
+    if (!await _ensureUnlocked() || !mounted) return null;
+    try {
+      final names = [
+        for (final d in await _cloudService.list())
+          if (!d.unreadable) d.name
+      ];
+      return await _pickFromList('参照先の図を選ぶ', names, 'アカウントに保存した図がありません。');
+    } catch (e) {
+      _showResultDialog('図の一覧を読めません', '$e');
+      return null;
+    }
+  }
+
+  /// Away Goal の主張を、参照先の図の公開ゴールから選ぶ
+  Future<String?> _pickPublicClaim(String module) async {
+    if (module.isEmpty) {
+      _showResultDialog('参照先の図が未設定です', '先に参照先のモジュール名を入れてください。');
+      return null;
+    }
+    if (_cloudBlockedReason != null) {
+      _showResultDialog('公開ゴールを選べません', _cloudBlockedReason!);
+      return null;
+    }
+    if (!await _ensureUnlocked() || !mounted) return null;
+    try {
+      final claims = await ModuleResolver.cloud(_cloudService).publicClaims(module);
+      if (claims == null) {
+        _showResultDialog('参照先の図がありません', '「$module」という名前の図はアカウントにありません。');
+        return null;
+      }
+      return await _pickFromList('「$module」の公開ゴール', claims,
+          '公開ゴールがありません。参照先の図で Goal を編集し「公開する」にチェックしてください。');
+    } catch (e) {
+      _showResultDialog('参照先の図を読めません', '$e');
+      return null;
+    }
+  }
+
+  Future<String?> _pickFromList(String title, List<String> items, String emptyText) {
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(title),
+        children: items.isEmpty
+            ? [Padding(padding: const EdgeInsets.all(16), child: Text(emptyText))]
+            : [
+                for (final item in items)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.pop(ctx, item),
+                    child: Text(item),
+                  ),
+              ],
       ),
     );
   }
@@ -2214,25 +2309,46 @@ class _GsnEditorState extends State<GsnEditor> {
         if (overwrite != true) return;
       }
 
-      // 中身はローカルの「JSON保存」と同じ形式
-      final data = {
-        'nodes': _nodes.map((n) => n.toJson()).toList(),
-        'edges': _edges.map((e) => e.toJson()).toList(),
-        'nodeCounter': _nodeCounter,
-      };
-      await _cloudService.save(name, jsonEncode(data));
-      _cloudDiagramName = name;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('「$name」をアカウントに保存しました。')),
-        );
-      }
+      await _writeToCloud(name);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('保存に失敗しました: $e')),
         );
       }
+    }
+  }
+
+  /// 今編集している図（開いた・保存した図）に、名前を聞かずにそのまま上書きする。
+  /// それまでの内容は版の履歴に残る。
+  Future<void> _overwriteCloud() async {
+    final name = _openCloudName;
+    if (name == null || !await _ensureUnlocked() || !mounted) return;
+    try {
+      await _writeToCloud(name);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存に失敗しました: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _writeToCloud(String name) async {
+    // 中身はローカルの「JSON保存」と同じ形式
+    final data = {
+      'nodes': _nodes.map((n) => n.toJson()).toList(),
+      'edges': _edges.map((e) => e.toJson()).toList(),
+      'nodeCounter': _nodeCounter,
+    };
+    await _cloudService.save(name, jsonEncode(data));
+    _cloudDiagramName = name;
+    if (mounted) {
+      setState(() => _openCloudName = name);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('「$name」をアカウントに保存しました。')),
+      );
     }
   }
 
@@ -2261,6 +2377,7 @@ class _GsnEditorState extends State<GsnEditor> {
       });
       _saveToLocalStorage();
       _cloudDiagramName = selected.name;
+      setState(() => _openCloudName = selected.name);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

@@ -66,6 +66,15 @@ class ModuleResolver {
     return (AwayStatus.ok, public.first, graph);
   }
 
+  /// モジュールの公開ゴールの主張の一覧（Away Goal の編集で選べるようにする）。図が無ければ null。
+  Future<List<String>?> publicClaims(String module) async {
+    final graph = await _load(module);
+    return graph?.nodes
+        .where((n) => n.type == GsnNodeType.goal && n.public)
+        .map((n) => n.label.trim())
+        .toList();
+  }
+
   /// 評価結果の Away Goal それぞれに、参照先が見つかるかどうかを付ける
   Future<void> check(List<GsnNode> nodes) async {
     for (final n in nodes) {
