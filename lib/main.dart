@@ -3166,6 +3166,7 @@ const Size _undevelopedMarkerSize = Size(20, 14);
 // ★追加(GSN v3 パターン拡張): 未具体化の印（Uninstantiated）。ノード下辺の中央に上の頂点を接する白抜きの三角。
 // PGSNでは説明文の "{変数名}" が評価時に置き換わる（build_gsn.py の process_description）ので、
 // GSNの要素のうち説明文に "{...}" を含むものを「未具体化」とみなして印を付ける。
+// 変数ノード（X）は要素そのものが評価時に置き換わる穴なので、常に「未具体化」とみなす。
 // 評価結果に印が残っていれば、値が渡されず置き換わらなかったことを表す。
 const Size _uninstantiatedMarkerSize = Size(16, 12);
 final RegExp _placeholderPattern = RegExp(r'\{[^{}]+\}');
@@ -3180,7 +3181,8 @@ const Set<GsnNodeType> _gsnElementTypes = {
 };
 
 bool _isUninstantiated(GsnNode node) =>
-    _gsnElementTypes.contains(node.type) && _placeholderPattern.hasMatch(node.label);
+    node.type == GsnNodeType.x ||
+    (_gsnElementTypes.contains(node.type) && _placeholderPattern.hasMatch(node.label));
 
 // ノード下辺から下に描く印の高さの合計（PDFの外接矩形の計算に使う）
 double _nodeMarkersHeight(GsnNode node) =>
