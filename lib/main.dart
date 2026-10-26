@@ -30,6 +30,7 @@ import 'browser_eval.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
+part 'module_resolver.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -150,6 +151,10 @@ class GsnNode {
   final bool undeveloped;
   // ★追加(GSN v3 モジュール拡張): Away Goal が参照するモジュールの名前。Away Goal 以外では空。
   String module;
+  // ★追加(GSN v3 モジュール拡張): 他の図の Away Goal から参照してよい Goal に付ける「公開」の印。
+  bool public;
+  // 評価結果の Away Goal に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
+  AwayStatus? awayStatus;
 
   GsnNode({
     required this.id,
@@ -160,7 +165,21 @@ class GsnNode {
     String? label,
     this.undeveloped = false,
     this.module = '',
+    this.public = false,
   }) : label = label ?? _gsnTypeName(type);
+
+  // id だけを付け替えた写し（モジュールの部分木を差し込むときに使う）
+  GsnNode copyWithId(int newId) => GsnNode(
+        id: newId,
+        type: type,
+        position: position,
+        width: width,
+        height: height,
+        label: label,
+        undeveloped: undeveloped,
+        module: module,
+        public: public,
+      );
 
 
 
@@ -177,6 +196,7 @@ class GsnNode {
       label: json['description'],
       undeveloped: json['undeveloped'] == true,
       module: json['module'] ?? '',
+      public: json['public'] == true,
     );
   }
 
@@ -190,6 +210,7 @@ class GsnNode {
         'height': height,
         if (undeveloped) 'undeveloped': true,
         if (module.isNotEmpty) 'module': module,
+        if (public) 'public': true,
       };
 
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
@@ -273,6 +294,7 @@ class _DiagramSnapshot {
                 label: n.label,
                 undeveloped: n.undeveloped,
                 module: n.module,
+                public: n.public,
               ))
           .toList(),
       edges: edges.map((e) => GsnEdge(e.fromId, e.toId)).toList(),
@@ -364,6 +386,8 @@ class _GsnEditorState extends State<GsnEditor> {
   final CryptoService _crypto = CryptoService();
   // アカウント（Firestore）への図の保存・読み出し（暗号化して保存する）
   late final CloudDiagramService _cloudService = CloudDiagramService(_crypto);
+  // ★追加(GSN v3 モジュール拡張): 評価のとき Away Goal を参照先の部分木に置き換えるか（既定は確かめるだけ）
+  bool _inlineAwayGoals = false;
   // アカウント（Firestore）に置くCSV。FileListノードが参照する（暗号化して保存する）
   late final CloudCsvService _csvService = CloudCsvService(_crypto);
   // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
@@ -457,6 +481,7 @@ class _GsnEditorState extends State<GsnEditor> {
               height: n.height,
               label: n.label,
               module: n.module,
+              public: n.public,
             ))
         .toList();
     // 選択ノード間のエッジも保持
@@ -489,6 +514,7 @@ class _GsnEditorState extends State<GsnEditor> {
         height: n.height,
         label: n.label,
         module: n.module,
+        public: n.public,
       ));
     }
     final newEdges = _clipboardEdges
@@ -562,9 +588,35 @@ class _GsnEditorState extends State<GsnEditor> {
   // 編集中の図を上書きしないため、GsnResultViewer をダイアログとして開く設計。
   Future<void> _evaluateGsn() async {
 
+    // ★追加(GSN v3 モジュール拡張): Away Goal の参照先（アカウントに保存した図）を読む準備。
+    // ログインしていない・鍵の解除をやめた場合、確認だけなら「未確認」として評価は続ける。
+    final usesModules =
+        _nodes.any((n) => n.type == GsnNodeType.awayGoal && n.module.isNotEmpty);
+    ModuleResolver? resolver;
+    if (usesModules && _cloudBlockedReason == null && await _ensureUnlocked()) {
+      resolver = ModuleResolver.cloud(_cloudService);
+    }
+    var evalNodes = _nodes;
+    var evalEdges = _edges;
+    if (usesModules && _inlineAwayGoals) {
+      if (resolver == null) {
+        _showErrorDialog('Away Goal に参照先を差し込んで評価するには、ログインして暗号化を解除してください。\n'
+            '${_cloudBlockedReason ?? ''}');
+        return;
+      }
+      try {
+        final merged = await resolver.inlineAll(_nodes, _edges);
+        evalNodes = merged.nodes;
+        evalEdges = merged.edges;
+      } catch (e) {
+        _showErrorDialog('Away Goal の参照先を読み込めませんでした: $e');
+        return;
+      }
+    }
+
     // 送信データ作成
     final Map<String, Object> requestData = {
-      "nodes": _nodes.map((n) => {
+      "nodes": evalNodes.map((n) => {
         "id": n.id,
         "gsn_type": GsnNode._gsnTypeName(n.type),
         "description": n.label,
@@ -574,12 +626,12 @@ class _GsnEditorState extends State<GsnEditor> {
         "height": n.height,
         if (n.module.isNotEmpty) "module": n.module,
       }).toList(),
-      "edges":_edges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
+      "edges": evalEdges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
     };
 
     // FileListノードが使うCSVは、アカウントから中身を読んで図と一緒に送る
     // （ブラウザ内の評価用Pythonにはファイルとして置かず、中身を直接渡す）。
-    final csvNames = _nodes
+    final csvNames = evalNodes
         .where((n) => n.type == GsnNodeType.fileList)
         .map((n) => n.label.trim())
         .toSet();
@@ -630,6 +682,21 @@ class _GsnEditorState extends State<GsnEditor> {
     final List<GsnEdge> resultEdges = edgeData
       .map((data) => GsnEdge.fromJson(data))
       .toList();
+
+    // ★追加(GSN v3 モジュール拡張): 評価結果に残った Away Goal の参照先を確かめる。
+    // {X} が置き換わったあとの文面で照合したいので、評価の後に行う。
+    for (final n in resultNodes) {
+      if (n.type == GsnNodeType.awayGoal && n.module.isNotEmpty) {
+        n.awayStatus = AwayStatus.notChecked;
+      }
+    }
+    if (resolver != null) {
+      try {
+        await resolver.check(resultNodes);
+      } catch (e) {
+        debugPrint('Away Goal の参照先を確かめられませんでした: $e');
+      }
+    }
     // ★ビューアをダイアログとして開く
     if (mounted) {
       showDialog(
@@ -1311,6 +1378,15 @@ class _GsnEditorState extends State<GsnEditor> {
               onPressed: _evaluateGsn,
               icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
               tooltip: '評価'),
+          // ★追加(GSN v3 モジュール拡張): Away Goal の扱いの切り替え
+          IconButton(
+              onPressed: () =>
+                  setState(() => _inlineAwayGoals = !_inlineAwayGoals),
+              icon: Icon(Icons.call_merge,
+                  color: _inlineAwayGoals ? Colors.blue : null),
+              tooltip: _inlineAwayGoals
+                  ? 'Away Goal：参照先を差し込んで評価する（クリックで確かめるだけに戻す）'
+                  : 'Away Goal：参照先を確かめるだけ（クリックで差し込んで評価する）'),
           // ローカルファイルから読み込むボタン
           IconButton(
             onPressed: _importJson,
@@ -1779,12 +1855,17 @@ class _GsnEditorState extends State<GsnEditor> {
       return;
     }
     final ctl = TextEditingController(text: node.label);
+    // ★追加(GSN v3 モジュール拡張): Goal は「公開」の印も一緒に編集する
+    var isPublic = node.public;
 
     // ダイアログで使う関数を先に定義する
     void submit() {
       if (ctl.text.isNotEmpty) {
         _saveToHistory();
-        setState(() => node.label = ctl.text);
+        setState(() {
+          node.label = ctl.text;
+          node.public = isPublic;
+        });
         _saveToLocalStorage();
       }
       Navigator.pop(context);
@@ -1794,7 +1875,22 @@ class _GsnEditorState extends State<GsnEditor> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('ノード名編集'),
-        content: TextField(controller: ctl, autofocus: true, onSubmitted: (_) => submit()),
+        content: StatefulBuilder(
+          builder: (context, setDialogState) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: ctl, autofocus: true, onSubmitted: (_) => submit()),
+              if (node.type == GsnNodeType.goal)
+                CheckboxListTile(
+                  value: isPublic,
+                  onChanged: (v) => setDialogState(() => isPublic = v ?? false),
+                  title: const Text('公開する（他の図の Away Goal から参照できる）'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                ),
+            ],
+          ),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context),
@@ -2292,10 +2388,20 @@ Widget _buildGsnShapeWidget(GsnNode node,
       return buildPainter(DefeaterPainter(backed: defeaterBacked));
 
     case GsnNodeType.awayGoal: // 主張は帯の上の部分に描くので、Painterにラベルごと渡す
-      return CustomPaint(
+      final awayGoal = CustomPaint(
         size: Size(node.width, node.height),
         painter: AwayGoalPainter(
-            label: node.label, module: node.module, isPalette: isPalette),
+            label: node.label,
+            module: node.module,
+            status: node.awayStatus,
+            isPalette: isPalette),
+      );
+      // 評価結果では帯の記号だけだと理由が分からないので、マウスを乗せると説明を出す
+      final status = node.awayStatus;
+      if (status == null) return awayGoal;
+      return Tooltip(
+        message: '参照先「${node.module}」：${_awayStatusText(status)}',
+        child: awayGoal,
       );
 
     case GsnNodeType.x:
@@ -3272,12 +3378,25 @@ final Paint _markerStrokePaint = Paint()
 
 // 印を上下に並べて描く: 下辺のすぐ下に未具体化の三角、その下に未展開の菱形（両方付くとき）
 void _paintNodeMarkers(Canvas canvas, GsnNode node) {
+  if (node.type == GsnNodeType.goal && node.public) _paintPublicMarker(canvas, node);
   var top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
   if (_isUninstantiated(node)) {
     _paintUninstantiatedMarker(canvas, top);
     top = top.translate(0, _uninstantiatedMarkerSize.height);
   }
   if (node.undeveloped) _paintUndevelopedMarker(canvas, top);
+}
+
+// ★追加(GSN v3 モジュール拡張): 公開の印。Goal の右上の内側に、モジュールの印（タブ付きの小さな箱）を描く。
+void _paintPublicMarker(Canvas canvas, GsnNode node) {
+  final x = node.position.dx + node.width - 18;
+  final y = node.position.dy + 5;
+  final body = Rect.fromLTWH(x, y + 2, 12, 8);
+  final tab = Rect.fromLTWH(x, y, 5, 2);
+  canvas.drawRect(body, _markerFillPaint);
+  canvas.drawRect(tab, _markerFillPaint);
+  canvas.drawRect(body, _markerStrokePaint);
+  canvas.drawRect(tab, _markerStrokePaint);
 }
 
 void _paintUninstantiatedMarker(Canvas canvas, Offset top) {
@@ -3327,9 +3446,14 @@ class _NodeMarkerPainter extends CustomPainter {
 class AwayGoalPainter extends CustomPainter {
   final String label;
   final String module;
+  // 評価結果で参照先を確かめたときの状態（帯の色と文で示す）。編集中は null。
+  final AwayStatus? status;
   final bool isPalette;
   AwayGoalPainter(
-      {required this.label, required this.module, this.isPalette = false});
+      {required this.label,
+      required this.module,
+      this.status,
+      this.isPalette = false});
 
   static const double bandHeight = 18;
 
@@ -3344,7 +3468,12 @@ class AwayGoalPainter extends CustomPainter {
       ..strokeWidth = 1;
 
     canvas.drawRect(body, Paint()..color = Colors.lightBlue.shade100);
-    canvas.drawRect(bandRect, Paint()..color = Colors.grey.shade200);
+    final bandColor = switch (status) {
+      AwayStatus.ok => Colors.green.shade100,
+      null || AwayStatus.notChecked => Colors.grey.shade200,
+      _ => Colors.red.shade100,
+    };
+    canvas.drawRect(bandRect, Paint()..color = bandColor);
     canvas.drawRect(Offset.zero & size, border);
     canvas.drawLine(bandRect.topLeft, bandRect.topRight, border);
 
@@ -3368,9 +3497,10 @@ class AwayGoalPainter extends CustomPainter {
         maxLines: 1,
         ellipsis: '…',
         textDirection: TextDirection.ltr,
-      )..layout(maxWidth: max(0.0, size.width - 26));
+      )..layout(maxWidth: max(0.0, size.width - (status == null ? 26 : 40)));
       moduleTp.paint(canvas,
           Offset(20, bandRect.top + (band - moduleTp.height) / 2));
+      if (status != null) _paintStatusIcon(canvas, bandRect, status!);
     }
 
     if (label.isNotEmpty) {
@@ -3393,10 +3523,41 @@ class AwayGoalPainter extends CustomPainter {
     }
   }
 
+  // 帯の右端に参照先の状態を記号で描く（見つかった: 緑のチェック / 未確認: 灰色の ? / 問題あり: 赤の !）
+  static void _paintStatusIcon(Canvas canvas, Rect band, AwayStatus status) {
+    final c = Offset(band.right - 10, band.center.dy);
+    if (status == AwayStatus.ok) {
+      canvas.drawPath(
+          Path()
+            ..moveTo(c.dx - 5, c.dy)
+            ..lineTo(c.dx - 1.5, c.dy + 4)
+            ..lineTo(c.dx + 5, c.dy - 4),
+          Paint()
+            ..color = Colors.green.shade800
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2);
+      return;
+    }
+    final tp = TextPainter(
+      text: TextSpan(
+        text: status == AwayStatus.notChecked ? '?' : '!',
+        style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: status == AwayStatus.notChecked
+                ? Colors.black54
+                : Colors.red.shade800),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+  }
+
   @override
   bool shouldRepaint(covariant AwayGoalPainter oldDelegate) =>
       oldDelegate.label != label ||
       oldDelegate.module != module ||
+      oldDelegate.status != status ||
       oldDelegate.isPalette != isPalette;
 }
 

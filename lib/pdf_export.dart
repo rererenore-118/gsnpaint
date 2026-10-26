@@ -177,7 +177,8 @@ void _paintNodeToCanvas(Canvas canvas, GsnNode node,
       painter = DefeaterPainter(backed: defeaterBacked);
       break;
     case GsnNodeType.awayGoal:
-      painter = AwayGoalPainter(label: node.label, module: node.module);
+      painter = AwayGoalPainter(
+          label: node.label, module: node.module, status: node.awayStatus);
       drawLabel = false;
       break;
     case GsnNodeType.x:
