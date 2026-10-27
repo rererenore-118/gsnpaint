@@ -146,9 +146,10 @@ class GsnNode {
   double width;
   double height;
   String label;
-  // ★追加(PGSN v0.0.4): 支持(support)が未展開であることを示す印。評価結果にだけ付く。
+  // ★追加(PGSN v0.0.4): 支持(support)が未展開であることを示す印（GSN規格の Undeveloped）。
   // GSN規格どおり、独立したノードではなくこのノードの下辺に小さな菱形として描く。
-  final bool undeveloped;
+  // エディタでは Goal / Strategy の編集ダイアログで付け外しし、評価結果では評価用Pythonが付ける。
+  bool undeveloped;
   // ★追加(GSN v3 モジュール拡張): Away Goal が参照するモジュールの名前。Away Goal 以外では空。
   String module;
   // ★追加(GSN v3 モジュール拡張): 他の図の Away Goal から参照してよい Goal に付ける「公開」の印。
@@ -483,6 +484,7 @@ class _GsnEditorState extends State<GsnEditor> {
               width: n.width,
               height: n.height,
               label: n.label,
+              undeveloped: n.undeveloped,
               module: n.module,
               public: n.public,
             ))
@@ -516,6 +518,7 @@ class _GsnEditorState extends State<GsnEditor> {
         width: n.width,
         height: n.height,
         label: n.label,
+        undeveloped: n.undeveloped,
         module: n.module,
         public: n.public,
       ));
@@ -629,6 +632,7 @@ class _GsnEditorState extends State<GsnEditor> {
         "width": n.width,
         "height": n.height,
         if (n.module.isNotEmpty) "module": n.module,
+        if (n.undeveloped) "undeveloped": true,
       }).toList(),
       "edges": evalEdges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
     };
@@ -793,6 +797,7 @@ class _GsnEditorState extends State<GsnEditor> {
             (data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
         _edges.addAll(
             (data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
+        _absorbUndevelopedNodes(_nodes, _edges);
         _nodeCounter = data['nodeCounter'] ?? 0;
       });
     } catch (e) {
@@ -1250,6 +1255,7 @@ class _GsnEditorState extends State<GsnEditor> {
           final newEdges = (data['edges'] as List)
               .map((edgeData) => GsnEdge.fromJson(edgeData))
               .toList();
+          _absorbUndevelopedNodes(newNodes, newEdges);
 
           setState(() {
             _nodes.clear();
@@ -1870,6 +1876,10 @@ class _GsnEditorState extends State<GsnEditor> {
     final ctl = TextEditingController(text: node.label);
     // ★追加(GSN v3 モジュール拡張): Goal は「公開」の印も一緒に編集する
     var isPublic = node.public;
+    // ★追加(GSN v3): Goal / Strategy は「未展開」の印も一緒に編集する
+    final canBeUndeveloped =
+        node.type == GsnNodeType.goal || node.type == GsnNodeType.strategy;
+    var isUndeveloped = node.undeveloped;
 
     // ダイアログで使う関数を先に定義する
     void submit() {
@@ -1878,6 +1888,7 @@ class _GsnEditorState extends State<GsnEditor> {
         setState(() {
           node.label = ctl.text;
           node.public = isPublic;
+          node.undeveloped = canBeUndeveloped && isUndeveloped;
         });
         _saveToLocalStorage();
       }
@@ -1898,6 +1909,17 @@ class _GsnEditorState extends State<GsnEditor> {
                   value: isPublic,
                   onChanged: (v) => setDialogState(() => isPublic = v ?? false),
                   title: const Text('公開する（他の図の Away Goal から参照できる）'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              if (canBeUndeveloped)
+                CheckboxListTile(
+                  value: isUndeveloped,
+                  onChanged: (v) => setDialogState(() => isUndeveloped = v ?? false),
+                  title: const Text('未展開（この先の論証はまだ書いていない）'),
+                  subtitle: node.type == GsnNodeType.strategy
+                      ? const Text('子のない Strategy は、印を付けなくても評価結果で未展開になります。')
+                      : const Text('子のない Goal は、印を付けなくても評価結果で未展開になります。'),
                   controlAffinity: ListTileControlAffinity.leading,
                   contentPadding: EdgeInsets.zero,
                 ),
@@ -2373,6 +2395,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _edges.clear();
         _nodes.addAll((data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
         _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
+        _absorbUndevelopedNodes(_nodes, _edges);
         _nodeCounter = data['nodeCounter'] ?? 0;
       });
       _saveToLocalStorage();
@@ -2576,7 +2599,6 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.strategy,
         GsnNodeType.context,
         GsnNodeType.evidence,
-        GsnNodeType.undeveloped,
         GsnNodeType.assumption,
         GsnNodeType.justification,
         GsnNodeType.defeater, // ★追加(Defeater)
@@ -3486,6 +3508,36 @@ const Set<GsnNodeType> _gsnElementTypes = {
 bool _isUninstantiated(GsnNode node) =>
     node.type == GsnNodeType.x ||
     (_gsnElementTypes.contains(node.type) && _placeholderPattern.hasMatch(node.label));
+
+// 以前の図では、未展開を Goal / Strategy の下に繋いだ独立のノード（大きな菱形）で表していた。
+// 読み込むときに、それを親の「未展開」の印に置き換える。説明を書き換えたもの、子を持つもの、
+// Goal / Strategy 以外（Defeater など）の下にあるものはノードのまま残す（評価の意味は変わらない）。
+void _absorbUndevelopedNodes(List<GsnNode> nodes, List<GsnEdge> edges) {
+  final byId = {for (final n in nodes) n.id: n};
+  final absorbed = <int>{};
+  for (final n in nodes) {
+    if (n.type != GsnNodeType.undeveloped) continue;
+    final label = n.label.trim();
+    if (label.isNotEmpty && label != GsnNode._gsnTypeName(GsnNodeType.undeveloped)) continue;
+    if (edges.any((e) => e.fromId == n.id)) continue;
+    final parents = [
+      for (final e in edges)
+        if (e.toId == n.id) byId[e.fromId]
+    ];
+    if (parents.isEmpty ||
+        parents.any((p) =>
+            p == null ||
+            (p.type != GsnNodeType.goal && p.type != GsnNodeType.strategy))) {
+      continue;
+    }
+    for (final p in parents) {
+      p!.undeveloped = true;
+    }
+    absorbed.add(n.id);
+  }
+  nodes.removeWhere((n) => absorbed.contains(n.id));
+  edges.removeWhere((e) => absorbed.contains(e.fromId) || absorbed.contains(e.toId));
+}
 
 // ノード下辺から下に描く印の高さの合計（PDFの外接矩形の計算に使う）
 double _nodeMarkersHeight(GsnNode node) =>
