@@ -2999,6 +2999,10 @@ class GsnEdgePainter extends CustomPainter {
       // ★追加(Dialectic): "challenges"関係（GSN v3のDialectic拡張）は他の関係と区別できるよう
       // 破線・赤系の色で描画する。選択中/削除モードの色は従来通り優先する。
       final isChallenge = _isChallengesEdge(toNode);
+      // GSN v3: InContextOf（Context/Assumption/Justification へ）は白抜きの矢じり、
+      // SupportedBy などそれ以外は黒塗りの矢じりで描き分ける
+      final isInContextOf = _sideAttachedTypes.contains(toNode.type) ||
+          _sideAttachedTypes.contains(fromNode.type);
 
       final paint = Paint()
         ..color = isRemovalMode
@@ -3192,29 +3196,6 @@ Offset? _bend2;
       }
 
 
-      // 線を描画（Map引数はL字折れ線、それ以外は直線）
-      // ★追加(Dialectic): challengesエッジは破線で描画する
-      if (_bend1 != null) {
-        // L字折れ線: startPoint → bend1 → (bend2 →) endPoint
-        final path = Path()
-          ..moveTo(startPoint.dx, startPoint.dy)
-          ..lineTo(_bend1!.dx, _bend1!.dy);
-        if (_bend2 != null) path.lineTo(_bend2!.dx, _bend2!.dy);
-        path.lineTo(endPoint.dx, endPoint.dy);
-        if (isChallenge) {
-          _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
-        } else {
-          canvas.drawPath(path, paint..style = PaintingStyle.stroke);
-        }
-      } else if (isChallenge) {
-        final path = Path()
-          ..moveTo(startPoint.dx, startPoint.dy)
-          ..lineTo(endPoint.dx, endPoint.dy);
-        _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
-      } else {
-        canvas.drawLine(startPoint, endPoint, paint);
-      }
-
       // 矢印の向きは最後のセグメントの方向で決める
       final Offset arrowFrom = _bend2 ?? _bend1 ?? startPoint;
       final Offset direction = (endPoint - arrowFrom);
@@ -3224,27 +3205,51 @@ Offset? _bend2;
 
       final Offset arrowPoint =
           endPoint - normalizedDirection * (isSelected ? 3 : 2);
-      const double arrowSize = 6.0;
+      const double arrowSize = 9.0;
+      final Offset arrowBase = arrowPoint - normalizedDirection * arrowSize;
+      // 白抜きの矢じりの中を線が通らないよう、線は矢じりの底辺で止める
+      final Offset lineEnd = isInContextOf ? arrowBase : endPoint;
+
+      // 線を描画（Map引数はL字折れ線、それ以外は直線）
+      // ★追加(Dialectic): challengesエッジは破線で描画する
+      if (_bend1 != null) {
+        // L字折れ線: startPoint → bend1 → (bend2 →) endPoint
+        final path = Path()
+          ..moveTo(startPoint.dx, startPoint.dy)
+          ..lineTo(_bend1!.dx, _bend1!.dy);
+        if (_bend2 != null) path.lineTo(_bend2!.dx, _bend2!.dy);
+        path.lineTo(lineEnd.dx, lineEnd.dy);
+        if (isChallenge) {
+          _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
+        } else {
+          canvas.drawPath(path, paint..style = PaintingStyle.stroke);
+        }
+      } else if (isChallenge) {
+        final path = Path()
+          ..moveTo(startPoint.dx, startPoint.dy)
+          ..lineTo(lineEnd.dx, lineEnd.dy);
+        _drawDashedPath(canvas, path, paint..style = PaintingStyle.stroke);
+      } else {
+        canvas.drawLine(startPoint, lineEnd, paint);
+      }
+
+      final Offset side =
+          Offset(-normalizedDirection.dy, normalizedDirection.dx) * (arrowSize / 2);
       final Path arrowPath = Path()
         ..moveTo(arrowPoint.dx, arrowPoint.dy)
-        ..lineTo(
-          arrowPoint.dx -
-              normalizedDirection.dx * arrowSize -
-              normalizedDirection.dy * arrowSize / 2,
-          arrowPoint.dy -
-              normalizedDirection.dy * arrowSize +
-              normalizedDirection.dx * arrowSize / 2,
-        )
-        ..lineTo(
-          arrowPoint.dx -
-              normalizedDirection.dx * arrowSize +
-              normalizedDirection.dy * arrowSize / 2,
-          arrowPoint.dy -
-              normalizedDirection.dy * arrowSize -
-              normalizedDirection.dx * arrowSize / 2,
-        )
+        ..lineTo((arrowBase + side).dx, (arrowBase + side).dy)
+        ..lineTo((arrowBase - side).dx, (arrowBase - side).dy)
         ..close();
-      canvas.drawPath(arrowPath, paint..style = PaintingStyle.fill);
+      if (isInContextOf) {
+        canvas.drawPath(
+            arrowPath,
+            Paint()
+              ..color = paint.color
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.5);
+      } else {
+        canvas.drawPath(arrowPath, paint..style = PaintingStyle.fill);
+      }
     }
   }
 
@@ -4090,7 +4095,7 @@ class GsnResultViewer extends StatelessWidget {
                           await _exportDiagramPdf(
                             nodes: nodes,
                             edges: edges,
-                            edgePainter: _SimpleEdgePainter(nodes, edges),
+                            edgePainter: GsnEdgePainter(nodes, edges),
                             fileName: 'gsn_evaluated.pdf',
                           );
                         } catch (e) {
@@ -4119,7 +4124,7 @@ class GsnResultViewer extends StatelessWidget {
                     // エッジの描画
                     CustomPaint(
                       size: Size(canvasWidth, canvasHeight),
-                      painter: _SimpleEdgePainter(nodes, edges),
+                      painter: GsnEdgePainter(nodes, edges),
                     ),
                     // ノードの描画
                     ...nodes.map((node) {
@@ -4209,50 +4214,3 @@ class GsnResultViewer extends StatelessWidget {
       borderRadius: BorderRadius.circular(radius),
     );
   }
-
-
-// ビューア専用のエッジ描画クラス
-class _SimpleEdgePainter extends CustomPainter {
-  final List<GsnNode> nodes;
-  final List<GsnEdge> edges;
-  _SimpleEdgePainter(this.nodes, this.edges);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    for (var edge in edges) {
-      // IDからノードオブジェクトを検索
-      try {
-        final fromNode = nodes.firstWhere((n) => n.id == edge.fromId);
-        final toNode = nodes.firstWhere((n) => n.id == edge.toId);
-
-        // ノードの中心同士を結ぶ
-        final start = Offset(
-            fromNode.position.dx + fromNode.width / 2,
-            fromNode.position.dy + fromNode.height / 2);
-        final end = Offset(
-            toNode.position.dx + toNode.width / 2,
-            toNode.position.dy + toNode.height / 2);
-
-        // ★追加(Dialectic): challengesエッジ(Defeaterへのアタッチ)は破線・赤系で区別する
-        final isChallenge = _isChallengesEdge(toNode);
-        final paint = Paint()
-          ..color = isChallenge ? Colors.red.shade700 : Colors.black
-          ..strokeWidth = 2
-          ..style = PaintingStyle.stroke;
-
-        if (isChallenge) {
-          final path = Path()
-            ..moveTo(start.dx, start.dy)
-            ..lineTo(end.dx, end.dy);
-          _drawDashedPath(canvas, path, paint);
-        } else {
-          canvas.drawLine(start, end, paint);
-        }
-      } catch (e) {
-        // ノードが見つからない場合はスキップ
-      }
-    }
-  }
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
