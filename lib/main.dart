@@ -3509,9 +3509,10 @@ bool _isUninstantiated(GsnNode node) =>
     node.type == GsnNodeType.x ||
     (_gsnElementTypes.contains(node.type) && _placeholderPattern.hasMatch(node.label));
 
-// 以前の図では、未展開を Goal / Strategy の下に繋いだ独立のノード（大きな菱形）で表していた。
-// 読み込むときに、それを親の「未展開」の印に置き換える。説明を書き換えたもの、子を持つもの、
-// Goal / Strategy 以外（Defeater など）の下にあるものはノードのまま残す（評価の意味は変わらない）。
+// 以前の図では、未展開を Goal / Strategy / Defeater の下に繋いだ独立のノード（大きな菱形）で表していた。
+// 読み込むときに、Goal / Strategy の下のものは親の「未展開」の印に置き換え、Defeater の下のものは消す
+// （Defeater は子が無ければ未対応の反証になるので、菱形があっても無くても評価の意味は同じ）。
+// 説明を書き換えたもの、子を持つもの、それ以外のノードの下にあるものはノードのまま残す。
 void _absorbUndevelopedNodes(List<GsnNode> nodes, List<GsnEdge> edges) {
   final byId = {for (final n in nodes) n.id: n};
   final absorbed = <int>{};
@@ -3527,11 +3528,13 @@ void _absorbUndevelopedNodes(List<GsnNode> nodes, List<GsnEdge> edges) {
     if (parents.isEmpty ||
         parents.any((p) =>
             p == null ||
-            (p.type != GsnNodeType.goal && p.type != GsnNodeType.strategy))) {
+            (p.type != GsnNodeType.goal &&
+                p.type != GsnNodeType.strategy &&
+                p.type != GsnNodeType.defeater))) {
       continue;
     }
     for (final p in parents) {
-      p!.undeveloped = true;
+      if (p!.type != GsnNodeType.defeater) p.undeveloped = true;
     }
     absorbed.add(n.id);
   }
