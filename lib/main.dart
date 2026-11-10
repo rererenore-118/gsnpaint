@@ -1391,6 +1391,38 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
+  // Delete / Backspace キーで、複数選択中の選択か、光っているノードを確認なしで消す。
+  // 消せるものがなければ false を返す。
+  bool _deleteByKey() {
+    final String message;
+    if (_selectionMode && _selectedNodeIds.isNotEmpty) {
+      message = '${_selectedNodeIds.length} 個のノードを削除しました';
+      _deleteSelected();
+    } else if (_connecting != null) {
+      final id = _connecting!;
+      final label = _nodes.firstWhere((n) => n.id == id).label;
+      message = label.isEmpty ? 'ノードを削除しました' : '「$label」を削除しました';
+      _saveToHistory();
+      _cancelConnecting();
+      setState(() {
+        _nodes.removeWhere((n) => n.id == id);
+        _edges.removeWhere((e) => e.fromId == id || e.toId == id);
+      });
+      _saveToLocalStorage();
+    } else {
+      return false;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(message),
+        // 操作ボタン付きの表示は既定で消えないので、数秒で消えるように指定する
+        persist: false,
+        action: SnackBarAction(label: '元に戻す', onPressed: _undo),
+      ));
+    return true;
+  }
+
   void _confirmDeleteNode(GsnNode node) {
     showDialog(
       context: context,
@@ -1530,10 +1562,27 @@ class _GsnEditorState extends State<GsnEditor> {
     return Focus(
       autofocus: true,
       onKeyEvent: (node, event) {
-        if (event is KeyDownEvent &&
-            event.logicalKey == LogicalKeyboardKey.escape &&
-            _connecting != null) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final key = event.logicalKey;
+        if (key == LogicalKeyboardKey.escape && _connecting != null) {
           _cancelConnecting();
+          return KeyEventResult.handled;
+        }
+        // Mac の delete キーは Backspace として届くので両方に反応する。
+        // ダイアログの入力中はフォーカスが別のルートにあるので、ここには来ない。
+        if (key == LogicalKeyboardKey.delete ||
+            key == LogicalKeyboardKey.backspace) {
+          return _deleteByKey()
+              ? KeyEventResult.handled
+              : KeyEventResult.ignored;
+        }
+        final keyboard = HardwareKeyboard.instance;
+        if (key == LogicalKeyboardKey.keyZ &&
+            (keyboard.isMetaPressed || keyboard.isControlPressed) &&
+            !keyboard.isShiftPressed &&
+            _undoStack.isNotEmpty) {
+          _cancelConnecting();
+          _undo();
           return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
