@@ -67,6 +67,10 @@ enum GsnNodeType {
   defeater, // ★追加: Confidence Argument対応。GSNノードへの疑義(反論)を表すノード
             // （PGSN v0.0.4以降はGoal/Strategy/Evidence/Defeaterのどれにも付けられる）
   awayGoal, // ★追加(GSN v3 モジュール拡張): 別のモジュールで論じられている主張を参照するゴール
+  awaySolution, // 別のモジュールの Solution（エディタの Evidence）を参照する要素
+  awayContext, // 別のモジュールの Context を参照する要素
+  awayAssumption, // 別のモジュールの Assumption を参照する要素
+  awayJustification, // 別のモジュールの Justification を参照する要素
   recordAccess,
   lambda,
   application,
@@ -85,6 +89,19 @@ const Set<GsnNodeType> _sideAttachedTypes = {
   GsnNodeType.context,
   GsnNodeType.assumption,
   GsnNodeType.justification,
+  GsnNodeType.awayContext,
+  GsnNodeType.awayAssumption,
+  GsnNodeType.awayJustification,
+};
+
+// ★追加(GSN v3 モジュール拡張): Away 要素と、それが参照する先の要素の種類の対応。
+// 「公開」の印を付けられるのは、参照先になれるこの右側の種類だけ。
+const Map<GsnNodeType, GsnNodeType> _awayTargetTypes = {
+  GsnNodeType.awayGoal: GsnNodeType.goal,
+  GsnNodeType.awaySolution: GsnNodeType.evidence,
+  GsnNodeType.awayContext: GsnNodeType.context,
+  GsnNodeType.awayAssumption: GsnNodeType.assumption,
+  GsnNodeType.awayJustification: GsnNodeType.justification,
 };
 
 // ★追加(Defeater): Defeaterは「親の横に付く」点はContext等と同じだが、
@@ -150,11 +167,11 @@ class GsnNode {
   // GSN規格どおり、独立したノードではなくこのノードの下辺に小さな菱形として描く。
   // エディタでは Goal / Strategy の編集ダイアログで付け外しし、評価結果では評価用Pythonが付ける。
   bool undeveloped;
-  // ★追加(GSN v3 モジュール拡張): Away Goal が参照するモジュールの名前。Away Goal 以外では空。
+  // ★追加(GSN v3 モジュール拡張): Away 要素が参照するモジュールの名前。Away 要素以外では空。
   String module;
-  // ★追加(GSN v3 モジュール拡張): 他の図の Away Goal から参照してよい Goal に付ける「公開」の印。
+  // ★追加(GSN v3 モジュール拡張): 他の図の Away 要素から参照してよい要素に付ける「公開」の印。
   bool public;
-  // 評価結果の Away Goal に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
+  // 評価結果の Away 要素に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
   AwayStatus? awayStatus;
 
   GsnNode({
@@ -167,7 +184,7 @@ class GsnNode {
     this.undeveloped = false,
     this.module = '',
     this.public = false,
-  }) : label = label ?? _gsnTypeName(type);
+  }) : label = label ?? _displayName(type);
 
   // id だけを付け替えた写し（モジュールの部分木を差し込むときに使う）
   GsnNode copyWithId(int newId) => GsnNode(
@@ -214,6 +231,11 @@ class GsnNode {
         if (public) 'public': true,
       };
 
+  // 画面に出す要素の名前。GSN の規格では Evidence にあたる要素を Solution と呼ぶ。
+  // 保存形式と評価用Pythonへ渡す名前は PGSN に合わせて _gsnTypeName() の Evidence のまま。
+  static String _displayName(GsnNodeType t) =>
+      t == GsnNodeType.evidence ? 'Solution' : _gsnTypeName(t);
+
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
     switch (t) {
@@ -235,6 +257,14 @@ class GsnNode {
         return 'Defeater';
       case GsnNodeType.awayGoal:
         return 'AwayGoal';
+      case GsnNodeType.awaySolution:
+        return 'AwaySolution';
+      case GsnNodeType.awayContext:
+        return 'AwayContext';
+      case GsnNodeType.awayAssumption:
+        return 'AwayAssumption';
+      case GsnNodeType.awayJustification:
+        return 'AwayJustification';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -598,7 +628,7 @@ class _GsnEditorState extends State<GsnEditor> {
     // ★追加(GSN v3 モジュール拡張): Away Goal の参照先（アカウントに保存した図）を読む準備。
     // ログインしていない・鍵の解除をやめた場合、確認だけなら「未確認」として評価は続ける。
     final usesModules =
-        _nodes.any((n) => n.type == GsnNodeType.awayGoal && n.module.isNotEmpty);
+        _nodes.any((n) => _awayTargetTypes.containsKey(n.type) && n.module.isNotEmpty);
     ModuleResolver? resolver;
     if (usesModules && _cloudBlockedReason == null && await _ensureUnlocked()) {
       resolver = ModuleResolver.cloud(_cloudService);
@@ -607,7 +637,7 @@ class _GsnEditorState extends State<GsnEditor> {
     var evalEdges = _edges;
     if (usesModules && _inlineAwayGoals) {
       if (resolver == null) {
-        _showErrorDialog('Away Goal に参照先を差し込んで評価するには、ログインして暗号化を解除してください。\n'
+        _showErrorDialog('Away 要素に参照先を差し込んで評価するには、ログインして暗号化を解除してください。\n'
             '${_cloudBlockedReason ?? ''}');
         return;
       }
@@ -616,7 +646,7 @@ class _GsnEditorState extends State<GsnEditor> {
         evalNodes = merged.nodes;
         evalEdges = merged.edges;
       } catch (e) {
-        _showErrorDialog('Away Goal の参照先を読み込めませんでした: $e');
+        _showErrorDialog('Away 要素の参照先を読み込めませんでした: $e');
         return;
       }
     }
@@ -694,7 +724,7 @@ class _GsnEditorState extends State<GsnEditor> {
     // ★追加(GSN v3 モジュール拡張): 評価結果に残った Away Goal の参照先を確かめる。
     // {X} が置き換わったあとの文面で照合したいので、評価の後に行う。
     for (final n in resultNodes) {
-      if (n.type == GsnNodeType.awayGoal && n.module.isNotEmpty) {
+      if (_awayTargetTypes.containsKey(n.type) && n.module.isNotEmpty) {
         n.awayStatus = AwayStatus.notChecked;
       }
     }
@@ -702,7 +732,7 @@ class _GsnEditorState extends State<GsnEditor> {
       try {
         await resolver.check(resultNodes);
       } catch (e) {
-        debugPrint('Away Goal の参照先を確かめられませんでした: $e');
+        debugPrint('Away 要素の参照先を確かめられませんでした: $e');
       }
     }
     // ★ビューアをダイアログとして開く
@@ -1397,8 +1427,8 @@ class _GsnEditorState extends State<GsnEditor> {
               icon: Icon(Icons.call_merge,
                   color: _inlineAwayGoals ? Colors.blue : null),
               tooltip: _inlineAwayGoals
-                  ? 'Away Goal：参照先を差し込んで評価する（クリックで確かめるだけに戻す）'
-                  : 'Away Goal：参照先を確かめるだけ（クリックで差し込んで評価する）'),
+                  ? 'Away 要素：参照先を差し込んで評価する（クリックで確かめるだけに戻す）'
+                  : 'Away 要素：参照先を確かめるだけ（クリックで差し込んで評価する）'),
           // ローカルファイルから読み込むボタン
           IconButton(
             onPressed: _importJson,
@@ -1869,12 +1899,13 @@ class _GsnEditorState extends State<GsnEditor> {
 
 
   void _editLabel(GsnNode node) {
-    if (node.type == GsnNodeType.awayGoal) {
-      _editAwayGoal(node);
+    if (_awayTargetTypes.containsKey(node.type)) {
+      _editAwayElement(node);
       return;
     }
     final ctl = TextEditingController(text: node.label);
-    // ★追加(GSN v3 モジュール拡張): Goal は「公開」の印も一緒に編集する
+    // ★追加(GSN v3 モジュール拡張): Away 要素の参照先になれる要素は「公開」の印も一緒に編集する
+    final canBePublic = _awayTargetTypes.containsValue(node.type);
     var isPublic = node.public;
     // ★追加(GSN v3): Goal / Strategy は「未展開」の印も一緒に編集する
     final canBeUndeveloped =
@@ -1887,7 +1918,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _saveToHistory();
         setState(() {
           node.label = ctl.text;
-          node.public = isPublic;
+          node.public = canBePublic && isPublic;
           node.undeveloped = canBeUndeveloped && isUndeveloped;
         });
         _saveToLocalStorage();
@@ -1904,11 +1935,11 @@ class _GsnEditorState extends State<GsnEditor> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(controller: ctl, autofocus: true, onSubmitted: (_) => submit()),
-              if (node.type == GsnNodeType.goal)
+              if (canBePublic)
                 CheckboxListTile(
                   value: isPublic,
                   onChanged: (v) => setDialogState(() => isPublic = v ?? false),
-                  title: const Text('公開する（他の図の Away Goal から参照できる）'),
+                  title: const Text('公開する（他の図の Away 要素から参照できる）'),
                   controlAffinity: ListTileControlAffinity.leading,
                   contentPadding: EdgeInsets.zero,
                 ),
@@ -1940,8 +1971,11 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 
 
-  // ★追加(GSN v3 モジュール拡張): Away Goal は主張と参照先のモジュール名を一緒に編集する
-  void _editAwayGoal(GsnNode node) {
+  // ★追加(GSN v3 モジュール拡張): Away 要素は説明文と参照先のモジュール名を一緒に編集する
+  void _editAwayElement(GsnNode node) {
+    final targetType = _awayTargetTypes[node.type]!;
+    final isGoal = targetType == GsnNodeType.goal;
+    final targetName = GsnNode._displayName(targetType);
     final claimCtl = TextEditingController(text: node.label);
     final moduleCtl = TextEditingController(text: node.module);
 
@@ -1960,7 +1994,7 @@ class _GsnEditorState extends State<GsnEditor> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Away Goal の編集'),
+        title: Text('Away ${GsnNode._gsnTypeName(node.type).substring(4)} の編集'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1968,12 +2002,12 @@ class _GsnEditorState extends State<GsnEditor> {
               controller: claimCtl,
               autofocus: true,
               decoration: InputDecoration(
-                labelText: '主張（参照先のゴールと同じ文面）',
+                labelText: isGoal ? '主張（参照先のゴールと同じ文面）' : '説明（参照先の $targetName と同じ文面）',
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.list),
-                  tooltip: '参照先の公開ゴールから選ぶ',
+                  tooltip: '参照先の公開 $targetName から選ぶ',
                   onPressed: () async {
-                    final claim = await _pickPublicClaim(moduleCtl.text.trim());
+                    final claim = await _pickPublicClaim(moduleCtl.text.trim(), targetType);
                     if (claim != null) claimCtl.text = claim;
                   },
                 ),
@@ -2010,7 +2044,7 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
-  /// Away Goal の参照先にする図を、アカウントに保存した図の一覧から選ぶ
+  /// Away 要素の参照先にする図を、アカウントに保存した図の一覧から選ぶ
   Future<String?> _pickModule() async {
     if (_cloudBlockedReason != null) {
       _showResultDialog('保存した図を選べません', _cloudBlockedReason!);
@@ -2029,25 +2063,27 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  /// Away Goal の主張を、参照先の図の公開ゴールから選ぶ
-  Future<String?> _pickPublicClaim(String module) async {
+  /// Away 要素の説明文を、参照先の図の公開された要素（[targetType] の種類）から選ぶ
+  Future<String?> _pickPublicClaim(String module, GsnNodeType targetType) async {
+    final targetName = GsnNode._displayName(targetType);
     if (module.isEmpty) {
       _showResultDialog('参照先の図が未設定です', '先に参照先のモジュール名を入れてください。');
       return null;
     }
     if (_cloudBlockedReason != null) {
-      _showResultDialog('公開ゴールを選べません', _cloudBlockedReason!);
+      _showResultDialog('公開 $targetName を選べません', _cloudBlockedReason!);
       return null;
     }
     if (!await _ensureUnlocked() || !mounted) return null;
     try {
-      final claims = await ModuleResolver.cloud(_cloudService).publicClaims(module);
+      final claims = await ModuleResolver.cloud(_cloudService)
+          .publicClaims(module, targetType: targetType);
       if (claims == null) {
         _showResultDialog('参照先の図がありません', '「$module」という名前の図はアカウントにありません。');
         return null;
       }
-      return await _pickFromList('「$module」の公開ゴール', claims,
-          '公開ゴールがありません。参照先の図で Goal を編集し「公開する」にチェックしてください。');
+      return await _pickFromList('「$module」の公開 $targetName', claims,
+          '公開 $targetName がありません。参照先の図で $targetName を編集し「公開する」にチェックしてください。');
     } catch (e) {
       _showResultDialog('参照先の図を読めません', '$e');
       return null;
@@ -2527,10 +2563,15 @@ Widget _buildGsnShapeWidget(GsnNode node,
     case GsnNodeType.defeater: // ★変更(Dialectic): defeaterBackedでdefeated/inDoubtの見た目を切り替える
       return buildPainter(DefeaterPainter(backed: defeaterBacked));
 
-    case GsnNodeType.awayGoal: // 主張は帯の上の部分に描くので、Painterにラベルごと渡す
-      final awayGoal = CustomPaint(
+    case GsnNodeType.awayGoal: // 説明文は帯の上の部分に描くので、Painterにラベルごと渡す
+    case GsnNodeType.awaySolution:
+    case GsnNodeType.awayContext:
+    case GsnNodeType.awayAssumption:
+    case GsnNodeType.awayJustification:
+      final awayElement = CustomPaint(
         size: Size(node.width, node.height),
-        painter: AwayGoalPainter(
+        painter: AwayElementPainter(
+            type: node.type,
             label: node.label,
             module: node.module,
             status: node.awayStatus,
@@ -2538,10 +2579,10 @@ Widget _buildGsnShapeWidget(GsnNode node,
       );
       // 評価結果では帯の記号だけだと理由が分からないので、マウスを乗せると説明を出す
       final status = node.awayStatus;
-      if (status == null) return awayGoal;
+      if (status == null) return awayElement;
       return Tooltip(
         message: '参照先「${node.module}」：${_awayStatusText(status)}',
-        child: awayGoal,
+        child: awayElement,
       );
 
     case GsnNodeType.x:
@@ -2603,6 +2644,10 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.justification,
         GsnNodeType.defeater, // ★追加(Defeater)
         GsnNodeType.awayGoal,
+        GsnNodeType.awaySolution,
+        GsnNodeType.awayContext,
+        GsnNodeType.awayAssumption,
+        GsnNodeType.awayJustification,
       ],
     ),
     _PaletteGroup(
@@ -2695,7 +2740,7 @@ class _PaletteItem extends StatelessWidget {
       position: Offset.zero,
       width: 80,
       height: 48,
-      label: GsnNode._gsnTypeName(type),
+      label: GsnNode._displayName(type),
     );
 
     // 図形ウィジェットの生成
@@ -2724,7 +2769,7 @@ class _PaletteItem extends StatelessWidget {
             const SizedBox(height: 4), // 図形と文字の間隔
             // 文字部分
             Text(
-              GsnNode._gsnTypeName(type),
+              GsnNode._displayName(type),
               style: const TextStyle(
                 fontSize: 11,
                 color: Colors.black87,
@@ -3503,6 +3548,10 @@ const Set<GsnNodeType> _gsnElementTypes = {
   GsnNodeType.justification,
   GsnNodeType.defeater,
   GsnNodeType.awayGoal,
+  GsnNodeType.awaySolution,
+  GsnNodeType.awayContext,
+  GsnNodeType.awayAssumption,
+  GsnNodeType.awayJustification,
 };
 
 bool _isUninstantiated(GsnNode node) =>
@@ -3555,7 +3604,9 @@ final Paint _markerStrokePaint = Paint()
 
 // 印を上下に並べて描く: 下辺のすぐ下に未具体化の三角、その下に未展開の菱形（両方付くとき）
 void _paintNodeMarkers(Canvas canvas, GsnNode node) {
-  if (node.type == GsnNodeType.goal && node.public) _paintPublicMarker(canvas, node);
+  if (_awayTargetTypes.containsValue(node.type) && node.public) {
+    _paintPublicMarker(canvas, node);
+  }
   var top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
   if (_isUninstantiated(node)) {
     _paintUninstantiatedMarker(canvas, top);
@@ -3564,7 +3615,7 @@ void _paintNodeMarkers(Canvas canvas, GsnNode node) {
   if (node.undeveloped) _paintUndevelopedMarker(canvas, top);
 }
 
-// ★追加(GSN v3 モジュール拡張): 公開の印。Goal の右上の内側に、モジュールの印（タブ付きの小さな箱）を描く。
+// ★追加(GSN v3 モジュール拡張): 公開の印。要素の右上の内側に、モジュールの印（タブ付きの小さな箱）を描く。
 void _paintPublicMarker(Canvas canvas, GsnNode node) {
   final x = node.position.dx + node.width - 18;
   final y = node.position.dy + 5;
@@ -3618,16 +3669,18 @@ class _NodeMarkerPainter extends CustomPainter {
   bool shouldRepaint(covariant _NodeMarkerPainter oldDelegate) => true;
 }
 
-// ★追加(GSN v3 モジュール拡張): Away Goal。Goal と同じ長方形の下部に帯を付け、
-// 帯にモジュールの印と参照先のモジュール名を書く。主張は帯より上の部分の中央に描く。
-class AwayGoalPainter extends CustomPainter {
+// ★追加(GSN v3 モジュール拡張): Away 要素。参照先の要素と同じ形の下に帯を付け、
+// 帯にモジュールの印と参照先のモジュール名を書く。説明文は帯より上の部分の中央に描く。
+class AwayElementPainter extends CustomPainter {
+  final GsnNodeType type;
   final String label;
   final String module;
   // 評価結果で参照先を確かめたときの状態（帯の色と文で示す）。編集中は null。
   final AwayStatus? status;
   final bool isPalette;
-  AwayGoalPainter(
-      {required this.label,
+  AwayElementPainter(
+      {required this.type,
+      required this.label,
       required this.module,
       this.status,
       this.isPalette = false});
@@ -3644,15 +3697,14 @@ class AwayGoalPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
 
-    canvas.drawRect(body, Paint()..color = Colors.lightBlue.shade100);
+    _paintBody(canvas, body);
     final bandColor = switch (status) {
       AwayStatus.ok => Colors.green.shade100,
       null || AwayStatus.notChecked => Colors.grey.shade200,
       _ => Colors.red.shade100,
     };
     canvas.drawRect(bandRect, Paint()..color = bandColor);
-    canvas.drawRect(Offset.zero & size, border);
-    canvas.drawLine(bandRect.topLeft, bandRect.topRight, border);
+    canvas.drawRect(bandRect, border);
 
     // モジュールの印（タブ付きの小さな箱）
     final iconTop = bandRect.top + (band - 8) / 2;
@@ -3691,13 +3743,30 @@ class AwayGoalPainter extends CustomPainter {
         ),
         textAlign: TextAlign.center,
         textDirection: TextDirection.ltr,
-      )..layout(maxWidth: max(0.0, size.width - 16));
+      )..layout(maxWidth: max(0.0, size.width - (_isOval ? 32 : 16)));
       canvas.save();
       canvas.clipRect(body);
       tp.paint(canvas,
           Offset((size.width - tp.width) / 2, (body.height - tp.height) / 2));
       canvas.restore();
     }
+  }
+
+  bool get _isOval =>
+      type == GsnNodeType.awaySolution ||
+      type == GsnNodeType.awayAssumption ||
+      type == GsnNodeType.awayJustification;
+
+  // 帯より上の部分に、参照先の要素と同じ形を描く
+  void _paintBody(Canvas canvas, Rect body) {
+    final CustomPainter shape = switch (type) {
+      GsnNodeType.awaySolution => EvidencePainter(),
+      GsnNodeType.awayContext => RoundedRectPainter(Colors.purple.shade100, 12),
+      GsnNodeType.awayAssumption => AnnotatedOvalPainter(Colors.yellow.shade100, 'A'),
+      GsnNodeType.awayJustification => AnnotatedOvalPainter(Colors.teal.shade100, 'J'),
+      _ => _AwayGoalBodyPainter(),
+    };
+    shape.paint(canvas, body.size);
   }
 
   // 帯の右端に参照先の状態を記号で描く（見つかった: 緑のチェック / 未確認: 灰色の ? / 問題あり: 赤の !）
@@ -3731,11 +3800,29 @@ class AwayGoalPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant AwayGoalPainter oldDelegate) =>
+  bool shouldRepaint(covariant AwayElementPainter oldDelegate) =>
+      oldDelegate.type != type ||
       oldDelegate.label != label ||
       oldDelegate.module != module ||
       oldDelegate.status != status ||
       oldDelegate.isPalette != isPalette;
+}
+
+class _AwayGoalBodyPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(rect, Paint()..color = Colors.lightBlue.shade100);
+    canvas.drawRect(
+        rect,
+        Paint()
+          ..color = Colors.black
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class UndevelopedPainter extends CustomPainter {

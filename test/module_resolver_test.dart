@@ -112,6 +112,55 @@ void main() {
     expect(await resolver().publicClaims('無い図'), isNull);
   });
 
+  test('Goal 以外の Away 要素は、同じ種類の公開された要素だけを参照する', () async {
+    ModuleResolver r() => ModuleResolver((name) async => name == 'M'
+        ? jsonEncode({
+            'nodes': [
+              node(0, GsnNodeType.evidence, '試験結果', public: true),
+              node(1, GsnNodeType.context, '運用環境', public: true),
+              node(2, GsnNodeType.assumption, '前提', public: true),
+              node(3, GsnNodeType.justification, '理由', public: true),
+              node(4, GsnNodeType.context, '非公開の文脈'),
+            ].map((n) => n.toJson()).toList(),
+            'edges': <Map<String, dynamic>>[],
+          })
+        : null);
+
+    final nodes = [
+      node(0, GsnNodeType.awaySolution, '試験結果', module: 'M'),
+      node(1, GsnNodeType.awayContext, '運用環境', module: 'M'),
+      node(2, GsnNodeType.awayAssumption, '前提', module: 'M'),
+      node(3, GsnNodeType.awayJustification, '理由', module: 'M'),
+      node(4, GsnNodeType.awayContext, '非公開の文脈', module: 'M'),
+      // 文面が同じでも種類が違えば参照先にしない
+      node(5, GsnNodeType.awaySolution, '運用環境', module: 'M'),
+    ];
+    await r().check(nodes);
+    expect(nodes.map((n) => n.awayStatus), [
+      AwayStatus.ok,
+      AwayStatus.ok,
+      AwayStatus.ok,
+      AwayStatus.ok,
+      AwayStatus.notPublic,
+      AwayStatus.goalMissing,
+    ]);
+
+    final merged = await r().inlineAll(nodes.sublist(0, 4), []);
+    expect(merged.nodes.map((n) => n.type).toSet(), {
+      GsnNodeType.evidence,
+      GsnNodeType.context,
+      GsnNodeType.assumption,
+      GsnNodeType.justification,
+    });
+    expect(await r().publicClaims('M', targetType: GsnNodeType.context), ['運用環境']);
+  });
+
+  test('Evidence は画面では Solution と表示し、保存形式は Evidence のまま', () {
+    final n = GsnNode(id: 0, type: GsnNodeType.evidence, position: Offset.zero);
+    expect(n.label, 'Solution');
+    expect(n.toJson()['gsn_type'], 'Evidence');
+  });
+
   test('循環する参照は止める', () async {
     final nodes = [node(0, GsnNodeType.awayGoal, 'A は安全', module: 'A')];
     final merged = await resolver().inlineAll(nodes, []);

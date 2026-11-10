@@ -1,7 +1,8 @@
-// GSN v3 モジュール拡張: Away Goal が参照するモジュールを解決する。
+// GSN v3 モジュール拡張: Away 要素（Goal / Solution / Context / Assumption / Justification）が
+// 参照するモジュールを解決する。
 //
-// モジュールはアカウントに保存した図（名前で引く）で、Away Goal から参照できるのは
-// 「公開」の印を付けた Goal だけ。主張の文面が一致するものを参照先とみなす。
+// モジュールはアカウントに保存した図（名前で引く）で、Away 要素から参照できるのは
+// 「公開」の印を付けた同じ種類の要素だけ。説明文が一致するものを参照先とみなす。
 // 評価用Python は Firestore を読めないので、参照先の読み込みと照合はすべてここで行う。
 part of 'main.dart';
 
@@ -10,7 +11,7 @@ enum AwayStatus { ok, moduleMissing, goalMissing, notPublic, notChecked }
 String _awayStatusText(AwayStatus s) => switch (s) {
       AwayStatus.ok => '参照OK',
       AwayStatus.moduleMissing => '図がありません',
-      AwayStatus.goalMissing => '主張が見つかりません',
+      AwayStatus.goalMissing => '参照先の要素が見つかりません',
       AwayStatus.notPublic => '公開されていません',
       AwayStatus.notChecked => '未確認',
     };
@@ -52,13 +53,13 @@ class ModuleResolver {
     return _cache[name] = graph;
   }
 
-  /// 参照先のモジュールから、Away Goal と同じ文面の公開ゴールを探す
+  /// 参照先のモジュールから、Away 要素と同じ文面の公開された要素（[targetType] の種類）を探す
   Future<(AwayStatus, GsnNode?, ModuleGraph?)> find(
-      String module, String claim) async {
+      String module, String claim, GsnNodeType targetType) async {
     final graph = await _load(module);
     if (graph == null) return (AwayStatus.moduleMissing, null, null);
     final same = graph.nodes
-        .where((n) => n.type == GsnNodeType.goal && n.label.trim() == claim.trim())
+        .where((n) => n.type == targetType && n.label.trim() == claim.trim())
         .toList();
     if (same.isEmpty) return (AwayStatus.goalMissing, null, graph);
     final public = same.where((n) => n.public).toList();
@@ -66,45 +67,48 @@ class ModuleResolver {
     return (AwayStatus.ok, public.first, graph);
   }
 
-  /// モジュールの公開ゴールの主張の一覧（Away Goal の編集で選べるようにする）。図が無ければ null。
-  Future<List<String>?> publicClaims(String module) async {
+  /// モジュールの公開された要素の説明文の一覧（Away 要素の編集で選べるようにする）。図が無ければ null。
+  Future<List<String>?> publicClaims(String module,
+      {GsnNodeType targetType = GsnNodeType.goal}) async {
     final graph = await _load(module);
     return graph?.nodes
-        .where((n) => n.type == GsnNodeType.goal && n.public)
+        .where((n) => n.type == targetType && n.public)
         .map((n) => n.label.trim())
         .toList();
   }
 
-  /// 評価結果の Away Goal それぞれに、参照先が見つかるかどうかを付ける
+  /// 評価結果の Away 要素それぞれに、参照先が見つかるかどうかを付ける
   Future<void> check(List<GsnNode> nodes) async {
     for (final n in nodes) {
-      if (n.type != GsnNodeType.awayGoal || n.module.isEmpty) continue;
-      n.awayStatus = (await find(n.module, n.label)).$1;
+      final targetType = _awayTargetTypes[n.type];
+      if (targetType == null || n.module.isEmpty) continue;
+      n.awayStatus = (await find(n.module, n.label, targetType)).$1;
     }
   }
 
-  /// Away Goal を、参照先の公開ゴールとその下の部分木に置き換えた図を返す。元の図は変えない。
-  /// 参照先が見つからない Away Goal はそのまま残す（評価のあとの check() で理由が分かる）。
+  /// Away 要素を、参照先の公開された要素とその下の部分木に置き換えた図を返す。元の図は変えない。
+  /// 参照先が見つからない Away 要素はそのまま残す（評価のあとの check() で理由が分かる）。
   Future<ModuleGraph> inlineAll(List<GsnNode> nodes, List<GsnEdge> edges) {
     _nextId = nodes.fold(0, (m, n) => max(m, n.id)) + 1;
     return _inline(nodes, edges, {});
   }
 
   // [visiting] は今たどっているモジュールの名前。同じモジュールに戻ってきた（循環した）ら、
-  // その Away Goal は置き換えずに残して止める。
+  // その Away 要素は置き換えずに残して止める。
   Future<ModuleGraph> _inline(
       List<GsnNode> nodes, List<GsnEdge> edges, Set<String> visiting) async {
     final outNodes = List<GsnNode>.of(nodes);
     var outEdges = List<GsnEdge>.of(edges);
 
     for (final away in nodes) {
-      if (away.type != GsnNodeType.awayGoal || away.module.isEmpty) continue;
+      final targetType = _awayTargetTypes[away.type];
+      if (targetType == null || away.module.isEmpty) continue;
       if (visiting.contains(away.module)) continue;
-      final (status, goal, graph) = await find(away.module, away.label);
+      final (status, target, graph) = await find(away.module, away.label, targetType);
       if (status != AwayStatus.ok) continue;
 
-      // 公開ゴールから下の部分木を、新しい id に付け替えて取り出す
-      final ids = _descendants(goal!.id, graph!.edges);
+      // 公開された要素から下の部分木を、新しい id に付け替えて取り出す
+      final ids = _descendants(target!.id, graph!.edges);
       final idMap = {for (final id in ids) id: _nextId++};
       final subNodes = graph.nodes
           .where((n) => ids.contains(n.id))
@@ -116,8 +120,8 @@ class ModuleResolver {
           .toList();
       final sub = await _inline(subNodes, subEdges, {...visiting, away.module});
 
-      // Away Goal につながっていた線は、差し込んだゴールにつなぎ直す
-      final root = idMap[goal.id]!;
+      // Away 要素につながっていた線は、差し込んだ要素につなぎ直す
+      final root = idMap[target.id]!;
       outNodes.remove(away);
       outNodes.addAll(sub.nodes);
       outEdges = [
