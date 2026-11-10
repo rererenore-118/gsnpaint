@@ -27,6 +27,7 @@ import 'cloud_csv_dialogs.dart';
 import 'crypto_dialogs.dart';
 import 'crypto_service.dart';
 import 'browser_eval.dart';
+import 'node_edit_dialog.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -104,6 +105,15 @@ const Map<GsnNodeType, GsnNodeType> _awayTargetTypes = {
   GsnNodeType.awayJustification: GsnNodeType.justification,
 };
 
+// 上の対応の逆向き。編集ダイアログで普通の要素を Away 要素に切り替えるときに使う。
+const Map<GsnNodeType, GsnNodeType> _awayTypeOf = {
+  GsnNodeType.goal: GsnNodeType.awayGoal,
+  GsnNodeType.evidence: GsnNodeType.awaySolution,
+  GsnNodeType.context: GsnNodeType.awayContext,
+  GsnNodeType.assumption: GsnNodeType.awayAssumption,
+  GsnNodeType.justification: GsnNodeType.awayJustification,
+};
+
 // ★追加(Defeater): Defeaterは「親の横に付く」点はContext等と同じだが、
 // 自分自身の下に反論への応答(Rebuttal)チェーンを展開できる点が異なるため、
 // レイアウト計算では区別できるよう専用セットを用意する。
@@ -158,7 +168,7 @@ bool _isDefeaterBacked(
 
 class GsnNode {
   final int id;
-  final GsnNodeType type;
+  GsnNodeType type; // 編集ダイアログで普通の要素と Away 要素を切り替える
   Offset position;
   double width;
   double height;
@@ -185,6 +195,18 @@ class GsnNode {
     this.module = '',
     this.public = false,
   }) : label = label ?? _displayName(type);
+
+  // 編集ダイアログの内容を反映する。「別の図を参照する」に応じて普通の要素と Away 要素を切り替える。
+  void applyEdit(NodeEditResult result) {
+    final baseType = _awayTargetTypes[type] ?? type;
+    final awayType = _awayTypeOf[baseType];
+    label = result.label;
+    if (awayType != null) type = result.isAway ? awayType : baseType;
+    module = result.module;
+    public = result.isPublic;
+    undeveloped = result.isUndeveloped;
+    awayStatus = null;
+  }
 
   // id だけを付け替えた写し（モジュールの部分木を差し込むときに使う）
   GsnNode copyWithId(int newId) => GsnNode(
@@ -286,6 +308,20 @@ class GsnNode {
     }
   }
 }
+
+// GSN v3 1:4.3.2: Away Goal は参照元の図で分解できない。Goal の下に主張を支える子
+// （Context などの横に付く要素と Defeater 以外）があるかを調べる。
+bool hasSupportingChild(GsnNode node, List<GsnNode> nodes, Iterable<GsnEdge> edges) {
+  if ((_awayTargetTypes[node.type] ?? node.type) != GsnNodeType.goal) return false;
+  return edges.any((e) =>
+      e.fromId == node.id &&
+      nodes.any((c) => c.id == e.toId && !_allSideTypes.contains(c.type)));
+}
+
+// GSN v3 1:4.3.2: Away Goal に支える子をつなぐ接続かどうか。Context などの横に付く要素と
+// Defeater は分解にあたらないのでつなげる。
+bool wouldDecomposeAwayGoal(GsnNode parent, GsnNode child) =>
+    parent.type == GsnNodeType.awayGoal && !_allSideTypes.contains(child.type);
 
 // エッジの向きは from（親）→ to（子）。Flaskへ送る際も同じ向きで送信する。
 class GsnEdge {
@@ -1196,6 +1232,16 @@ class _GsnEditorState extends State<GsnEditor> {
         _connectPreviewEnd.value = node.position +
             (_lastTapDownLocalPos ?? Offset(node.width / 2, node.height / 2));
       } else if (_connecting != node.id) {
+        final parent = _nodes.firstWhere((n) => n.id == _connecting);
+        if (wouldDecomposeAwayGoal(parent, node)) {
+          _cancelConnecting();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Away Goal の下に支える子は付けられません。論証は参照先の図に書きます。'),
+            ),
+          );
+          return;
+        }
         _saveToHistory();
         setState(() {
           _edges.add(GsnEdge(_connecting!, node.id));
@@ -1358,7 +1404,14 @@ class _GsnEditorState extends State<GsnEditor> {
       child: Scaffold(
       appBar: AppBar(
         title: const Text('GSNエディタ'),
+        // 幅が足りないときにはみ出さないよう、ボタンの列を横スクロールできるようにする。
         actions: [
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
           IconButton(
             icon: const Icon(Icons.undo),
             onPressed: _undoStack.isEmpty ? null : _undo,
@@ -1488,6 +1541,10 @@ class _GsnEditorState extends State<GsnEditor> {
             icon: const Icon(Icons.clear_all),
             tooltip: '図をすべて削除（リセット）',
             onPressed: _confirmClearDiagram,
+          ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -1898,150 +1955,42 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 
 
-  void _editLabel(GsnNode node) {
-    if (_awayTargetTypes.containsKey(node.type)) {
-      _editAwayElement(node);
-      return;
-    }
-    final ctl = TextEditingController(text: node.label);
-    // ★追加(GSN v3 モジュール拡張): Away 要素の参照先になれる要素は「公開」の印も一緒に編集する
-    final canBePublic = _awayTargetTypes.containsValue(node.type);
-    var isPublic = node.public;
-    // ★追加(GSN v3): Goal / Strategy は「未展開」の印も一緒に編集する
+  // 普通の要素と Away 要素は同じダイアログで編集し、「別の図を参照する」で種類を切り替える。
+  // 保存形式と評価では、これまでどおり AwayGoal などの別の種類として扱う。
+  Future<void> _editLabel(GsnNode node) async {
+    final baseType = _awayTargetTypes[node.type] ?? node.type;
+    final awayType = _awayTypeOf[baseType];
     final canBeUndeveloped =
-        node.type == GsnNodeType.goal || node.type == GsnNodeType.strategy;
-    var isUndeveloped = node.undeveloped;
+        baseType == GsnNodeType.goal || baseType == GsnNodeType.strategy;
+    final hasSupportChild = hasSupportingChild(node, _nodes, _edges);
 
-    // ダイアログで使う関数を先に定義する
-    void submit() {
-      if (ctl.text.isNotEmpty) {
-        _saveToHistory();
-        setState(() {
-          node.label = ctl.text;
-          node.public = canBePublic && isPublic;
-          node.undeveloped = canBeUndeveloped && isUndeveloped;
-        });
-        _saveToLocalStorage();
-      }
-      Navigator.pop(context);
-    }
-
-    showDialog(
+    final result = await showDialog<NodeEditResult>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('ノード名編集'),
-        content: StatefulBuilder(
-          builder: (context, setDialogState) => Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: ctl, autofocus: true, onSubmitted: (_) => submit()),
-              if (canBePublic)
-                CheckboxListTile(
-                  value: isPublic,
-                  onChanged: (v) => setDialogState(() => isPublic = v ?? false),
-                  title: const Text('公開する（他の図の Away 要素から参照できる）'),
-                  controlAffinity: ListTileControlAffinity.leading,
-                  contentPadding: EdgeInsets.zero,
-                ),
-              if (canBeUndeveloped)
-                CheckboxListTile(
-                  value: isUndeveloped,
-                  onChanged: (v) => setDialogState(() => isUndeveloped = v ?? false),
-                  title: const Text('未展開（この先の論証はまだ書いていない）'),
-                  subtitle: node.type == GsnNodeType.strategy
-                      ? const Text('子のない Strategy は、印を付けなくても評価結果で未展開になります。')
-                      : const Text('子のない Goal は、印を付けなくても評価結果で未展開になります。'),
-                  controlAffinity: ListTileControlAffinity.leading,
-                  contentPadding: EdgeInsets.zero,
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('キャンセル')),
-          TextButton(
-            onPressed: submit,
-            child: const Text('保存'),
-          ),
-        ],
+      builder: (_) => NodeEditDialog(
+        typeName: GsnNode._displayName(baseType),
+        initialLabel: node.label,
+        initialModule: node.module,
+        initialIsAway: _awayTargetTypes.containsKey(node.type),
+        initialIsPublic: node.public,
+        initialIsUndeveloped: node.undeveloped,
+        canReference: awayType != null,
+        canBePublic: awayType != null,
+        canBeUndeveloped: canBeUndeveloped,
+        referenceBlockedReason: hasSupportChild
+            ? 'この Goal の下に子があるので Away にできません。論証は参照先の図に書きます。'
+            : null,
+        undevelopedHint: canBeUndeveloped
+            ? '子のない ${GsnNode._displayName(baseType)} は、印を付けなくても評価結果で未展開になります。'
+            : null,
+        pickModule: _pickModule,
+        pickClaim: (module) => _pickPublicClaim(module, baseType),
       ),
     );
-  }
+    if (result == null || !mounted) return;
 
-
-  // ★追加(GSN v3 モジュール拡張): Away 要素は説明文と参照先のモジュール名を一緒に編集する
-  void _editAwayElement(GsnNode node) {
-    final targetType = _awayTargetTypes[node.type]!;
-    final isGoal = targetType == GsnNodeType.goal;
-    final targetName = GsnNode._displayName(targetType);
-    final claimCtl = TextEditingController(text: node.label);
-    final moduleCtl = TextEditingController(text: node.module);
-
-    void submit() {
-      if (claimCtl.text.isNotEmpty) {
-        _saveToHistory();
-        setState(() {
-          node.label = claimCtl.text;
-          node.module = moduleCtl.text.trim();
-        });
-        _saveToLocalStorage();
-      }
-      Navigator.pop(context);
-    }
-
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Away ${GsnNode._gsnTypeName(node.type).substring(4)} の編集'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: claimCtl,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: isGoal ? '主張（参照先のゴールと同じ文面）' : '説明（参照先の $targetName と同じ文面）',
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.list),
-                  tooltip: '参照先の公開 $targetName から選ぶ',
-                  onPressed: () async {
-                    final claim = await _pickPublicClaim(moduleCtl.text.trim(), targetType);
-                    if (claim != null) claimCtl.text = claim;
-                  },
-                ),
-              ),
-              onSubmitted: (_) => submit(),
-            ),
-            TextField(
-              controller: moduleCtl,
-              decoration: InputDecoration(
-                labelText: '参照先のモジュール名',
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.folder_special),
-                  tooltip: 'アカウントに保存した図から選ぶ',
-                  onPressed: () async {
-                    final name = await _pickModule();
-                    if (name != null) moduleCtl.text = name;
-                  },
-                ),
-              ),
-              onSubmitted: (_) => submit(),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('キャンセル')),
-          TextButton(
-            onPressed: submit,
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
+    _saveToHistory();
+    setState(() => node.applyEdit(result));
+    _saveToLocalStorage();
   }
 
   /// Away 要素の参照先にする図を、アカウントに保存した図の一覧から選ぶ
@@ -2643,11 +2592,6 @@ class GsnPalette extends StatelessWidget {
         GsnNodeType.assumption,
         GsnNodeType.justification,
         GsnNodeType.defeater, // ★追加(Defeater)
-        GsnNodeType.awayGoal,
-        GsnNodeType.awaySolution,
-        GsnNodeType.awayContext,
-        GsnNodeType.awayAssumption,
-        GsnNodeType.awayJustification,
       ],
     ),
     _PaletteGroup(
