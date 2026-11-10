@@ -1207,6 +1207,143 @@ class _GsnEditorState extends State<GsnEditor> {
     _saveToLocalStorage();
   }
 
+  Widget _toolbarDivider() =>
+      const SizedBox(height: 24, child: VerticalDivider(width: 16));
+
+  PopupMenuEntry<VoidCallback> _menuHeader(String label) => PopupMenuItem(
+        enabled: false,
+        height: 28,
+        child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+      );
+
+  PopupMenuEntry<VoidCallback> _menuItem(
+    IconData icon,
+    String label,
+    VoidCallback? action, {
+    Color? color,
+  }) =>
+      PopupMenuItem(
+        value: action,
+        enabled: action != null,
+        height: 40,
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: color),
+            const SizedBox(width: 12),
+            Flexible(child: Text(label, style: TextStyle(color: color))),
+          ],
+        ),
+      );
+
+  // 開く・保存・書き出し・CSV など、毎回は使わない操作をまとめたメニュー
+  Widget _buildFileMenu() {
+    return PopupMenuButton<VoidCallback>(
+      tooltip: 'ファイル',
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        if (_cloudReady) ...[
+          _menuHeader('アカウント'),
+          _menuItem(Icons.folder_special, '開く', _openFromCloud),
+          _menuItem(Icons.save, '上書き保存',
+              _openCloudName == null ? null : _overwriteCloud),
+          _menuItem(Icons.save_as, '名前を付けて保存', _saveToCloud),
+          const PopupMenuDivider(),
+        ],
+        _menuHeader('ローカル'),
+        _menuItem(Icons.folder_open, 'JSON 読み込み', _importJson),
+        _menuItem(Icons.save_alt, 'JSON 保存', _exportJson),
+        _menuItem(Icons.picture_as_pdf, 'PDF 保存', _nodes.isEmpty ? null : _exportPdf),
+        const PopupMenuDivider(),
+        _menuHeader('CSV'),
+        _menuItem(Icons.upload_file, 'アップロード', _uploadCsv),
+        if (_cloudReady) _menuItem(Icons.table_chart_outlined, '管理', _openCsvManager),
+        const PopupMenuDivider(),
+        _menuItem(
+          _gridSnapEnabled ? Icons.grid_on : Icons.grid_off,
+          _gridSnapEnabled ? 'グリッド: オン' : 'グリッド: オフ',
+          () => setState(() => _gridSnapEnabled = !_gridSnapEnabled),
+        ),
+        const PopupMenuDivider(),
+        _menuItem(Icons.clear_all, '図をすべて削除', _confirmClearDiagram, color: Colors.red),
+      ],
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [Text('ファイル'), Icon(Icons.arrow_drop_down)],
+        ),
+      ),
+    );
+  }
+
+  // 評価ボタンと、Away 要素を評価でどう扱うかの選択
+  Widget _buildEvaluateButton() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FilledButton.icon(
+          onPressed: _evaluateGsn,
+          icon: const Icon(Icons.play_arrow),
+          label: const Text('評価'),
+        ),
+        PopupMenuButton<bool>(
+          tooltip: _inlineAwayGoals
+              ? 'Away 要素：参照先を差し込んで評価する'
+              : 'Away 要素：参照先を確かめるだけ',
+          icon: Icon(
+            Icons.arrow_drop_down,
+            color: _inlineAwayGoals ? Colors.blue : null,
+          ),
+          onSelected: (inline) => setState(() => _inlineAwayGoals = inline),
+          itemBuilder: (context) => [
+            CheckedPopupMenuItem(
+              value: false,
+              checked: !_inlineAwayGoals,
+              child: const Text('参照先を確かめるだけ'),
+            ),
+            CheckedPopupMenuItem(
+              value: true,
+              checked: _inlineAwayGoals,
+              child: const Text('参照先を差し込んで評価'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSelectionBar() {
+    return Material(
+      elevation: 4,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('${_selectedNodeIds.length} 個選択中'),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: _selectedNodeIds.isNotEmpty ? _copySelected : null,
+              icon: const Icon(Icons.copy),
+              label: const Text('コピー'),
+            ),
+            TextButton.icon(
+              onPressed: _clipboard.isNotEmpty ? _pasteClipboard : null,
+              icon: const Icon(Icons.paste),
+              label: const Text('貼り付け'),
+            ),
+            TextButton.icon(
+              onPressed: _selectedNodeIds.isNotEmpty ? _deleteSelected : null,
+              icon: const Icon(Icons.delete_sweep),
+              label: const Text('削除'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _toggleDeleteMode() {
     setState(() => _deleteMode = !_deleteMode);
   }
@@ -1402,8 +1539,12 @@ class _GsnEditorState extends State<GsnEditor> {
         return KeyEventResult.ignored;
       },
       child: Scaffold(
+      // 複数選択中の操作は、ツールバーのボタンの位置を動かさないよう画面の下に出す
+      floatingActionButton: _selectionMode ? _buildSelectionBar() : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       appBar: AppBar(
         title: const Text('GSNエディタ'),
+        centerTitle: false,
         // 幅が足りないときにはみ出さないよう、ボタンの列を横スクロールできるようにする。
         actions: [
           Flexible(
@@ -1412,136 +1553,64 @@ class _GsnEditorState extends State<GsnEditor> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-          IconButton(
-            icon: const Icon(Icons.undo),
-            onPressed: _undoStack.isEmpty ? null : _undo,
-            tooltip: '元に戻す (Undo)',
-          ),
-          IconButton(
-            icon: const Icon(Icons.redo),
-            onPressed: _redoStack.isEmpty ? null : _redo,
-            tooltip: 'やり直す (Redo)',
-          ),
-          IconButton(
-            icon: Icon(
-              _gridSnapEnabled ? Icons.grid_on : Icons.grid_off,
-              color: _gridSnapEnabled ? Colors.blue : null,
-            ),
-            onPressed: () => setState(() => _gridSnapEnabled = !_gridSnapEnabled),
-            tooltip: 'グリッドスナップ切替',
-          ),
-          IconButton(
-            icon: Icon(
-              Icons.select_all,
-              color: _selectionMode ? Colors.orange : null,
-            ),
-            onPressed: _toggleSelectionMode,
-            tooltip: '複数選択モード切替',
-          ),
-          if (_selectionMode) ...[
-            IconButton(
-              icon: const Icon(Icons.copy),
-              onPressed: _selectedNodeIds.isNotEmpty ? _copySelected : null,
-              tooltip: '選択ノードをコピー',
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_sweep),
-              onPressed: _selectedNodeIds.isNotEmpty ? _deleteSelected : null,
-              tooltip: '選択ノードを一括削除',
-            ),
-            IconButton(
-              icon: const Icon(Icons.paste),
-              onPressed: _clipboard.isNotEmpty ? _pasteClipboard : null,
-              tooltip: 'ペースト (+40px オフセット)',
-            ),
-          ],
-          IconButton(
-            icon: Icon(
-                _deleteMode ? Icons.delete_forever : Icons.delete_outline),
-            onPressed: _toggleDeleteMode,
-            tooltip: '削除モード切替',
-          ),
-          IconButton(
-              onPressed: _exportJson,
-              icon: const Icon(Icons.save_alt),
-              tooltip: 'JSON保存（ローカル）'),
-          IconButton(
-              onPressed: _nodes.isEmpty ? null : _exportPdf,
-              icon: const Icon(Icons.picture_as_pdf),
-              tooltip: 'PDF保存（現在の図）'),
-           IconButton(
-              onPressed: _evaluateGsn,
-              icon: const Icon(Icons.play_arrow), // アイコンを再生マークに変更
-              tooltip: '評価'),
-          // ★追加(GSN v3 モジュール拡張): Away Goal の扱いの切り替え
-          IconButton(
-              onPressed: () =>
-                  setState(() => _inlineAwayGoals = !_inlineAwayGoals),
-              icon: Icon(Icons.call_merge,
-                  color: _inlineAwayGoals ? Colors.blue : null),
-              tooltip: _inlineAwayGoals
-                  ? 'Away 要素：参照先を差し込んで評価する（クリックで確かめるだけに戻す）'
-                  : 'Away 要素：参照先を確かめるだけ（クリックで差し込んで評価する）'),
-          // ローカルファイルから読み込むボタン
-          IconButton(
-            onPressed: _importJson,
-            icon: const Icon(Icons.folder_open),
-            tooltip: 'ローカルJSON読み込み',
-          ),
-          // エディタのアカウント（ログイン/ログアウト）
-          IconButton(
-            icon: Icon(
-              _user != null ? Icons.person : Icons.person_outline,
-              // 青: 使える状態 / オレンジ: メールアドレス未確認
-              color: _user == null ? null : (_cloudReady ? Colors.blue : Colors.orange),
-            ),
-            onPressed: _openAccount,
-            tooltip: _user == null
-                ? 'ログイン / 新規登録'
-                : _cloudReady
-                    ? 'アカウント（${_user!.email ?? ""}）'
-                    : 'アカウント（メールアドレス未確認）',
-          ),
-          if (_cloudReady) ...[
-            IconButton(
-              icon: const Icon(Icons.save),
-              onPressed: _openCloudName == null ? null : _overwriteCloud,
-              tooltip: _openCloudName == null
-                  ? '上書き保存（アカウントから開いた図・保存した図に使えます）'
-                  : '上書き保存（「$_openCloudName」）',
-            ),
-            IconButton(
-              icon: const Icon(Icons.save_as),
-              onPressed: _saveToCloud,
-              tooltip: '名前を付けてアカウントに保存',
-            ),
-            IconButton(
-              icon: const Icon(Icons.folder_special),
-              onPressed: _openFromCloud,
-              tooltip: 'アカウントから開く',
-            ),
-          ],
-          IconButton(
-            icon: const Icon(Icons.upload_file),
-            tooltip: 'CSVをアカウントにアップロード',
-            onPressed: _uploadCsv,
-          ),
-          if (_cloudReady)
-            IconButton(
-              icon: const Icon(Icons.table_chart_outlined),
-              tooltip: 'アカウントのCSVを管理',
-              onPressed: _openCsvManager,
-            ),
-          IconButton(
-            icon: const Icon(Icons.account_tree),
-            tooltip: '自動レイアウト',
-            onPressed: _nodes.isEmpty ? null : _autoLayout,
-          ),
-          IconButton(
-            icon: const Icon(Icons.clear_all),
-            tooltip: '図をすべて削除（リセット）',
-            onPressed: _confirmClearDiagram,
-          ),
+                  _buildFileMenu(),
+                  if (_cloudReady)
+                    IconButton(
+                      icon: const Icon(Icons.save),
+                      onPressed: _openCloudName == null ? null : _overwriteCloud,
+                      tooltip: _openCloudName == null
+                          ? '上書き保存（アカウントから開いた図・保存した図に使えます）'
+                          : '上書き保存（「$_openCloudName」）',
+                    ),
+                  _toolbarDivider(),
+                  IconButton(
+                    icon: const Icon(Icons.undo),
+                    onPressed: _undoStack.isEmpty ? null : _undo,
+                    tooltip: '元に戻す (Undo)',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.redo),
+                    onPressed: _redoStack.isEmpty ? null : _redo,
+                    tooltip: 'やり直す (Redo)',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.account_tree),
+                    tooltip: '自動レイアウト',
+                    onPressed: _nodes.isEmpty ? null : _autoLayout,
+                  ),
+                  _toolbarDivider(),
+                  IconButton(
+                    icon: Icon(
+                      Icons.select_all,
+                      color: _selectionMode ? Colors.orange : null,
+                    ),
+                    onPressed: _toggleSelectionMode,
+                    tooltip: '複数選択モード切替',
+                  ),
+                  IconButton(
+                    icon: Icon(
+                        _deleteMode ? Icons.delete_forever : Icons.delete_outline),
+                    onPressed: _toggleDeleteMode,
+                    tooltip: '削除モード切替',
+                  ),
+                  _toolbarDivider(),
+                  _buildEvaluateButton(),
+                  // エディタのアカウント（ログイン/ログアウト）
+                  IconButton(
+                    icon: Icon(
+                      _user != null ? Icons.person : Icons.person_outline,
+                      // 青: 使える状態 / オレンジ: メールアドレス未確認
+                      color: _user == null
+                          ? null
+                          : (_cloudReady ? Colors.blue : Colors.orange),
+                    ),
+                    onPressed: _openAccount,
+                    tooltip: _user == null
+                        ? 'ログイン / 新規登録'
+                        : _cloudReady
+                            ? 'アカウント（${_user!.email ?? ""}）'
+                            : 'アカウント（メールアドレス未確認）',
+                  ),
                 ],
               ),
             ),
