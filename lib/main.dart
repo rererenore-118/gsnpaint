@@ -407,6 +407,10 @@ class _GsnEditorState extends State<GsnEditor> {
 
   // 複数選択モード
   bool _selectionMode = false;
+  // ⌘クリック・⌘A・⌘V で自動的に入った複数選択モードか。こちらは Mac の Finder と同じく、
+  // 空白のクリックや修飾キーなしのクリックで普段の操作に戻る。
+  // ツールバーのボタンで入ったときは false で、従来どおりクリックで選択を足し引きする。
+  bool _selectionByModifier = false;
   final Set<int> _selectedNodeIds = {};
   Offset? _selectionRectStart;
   Offset? _selectionRectEnd;
@@ -475,6 +479,7 @@ class _GsnEditorState extends State<GsnEditor> {
   void _toggleSelectionMode() {
     setState(() {
       _selectionMode = !_selectionMode;
+      _selectionByModifier = false;
       _selectedNodeIds.clear();
       _selectionRectStart = null;
       _selectionRectEnd = null;
@@ -1359,6 +1364,44 @@ class _GsnEditorState extends State<GsnEditor> {
   // 2タップでエッジ接続: 1回目でfrom（青くなる）を選択、2回目でtoを確定してエッジ追加。
   // 同じノードを2回タップするとキャンセル。
   // 接続待ちの解除はここ（同じノードを再タップ）のほか、Esc・右クリック・空白クリックでも行える。
+  /// ⌘（Windows などでは Ctrl）を押しながらのクリックか。
+  bool get _multiSelectKeyPressed {
+    final k = HardwareKeyboard.instance;
+    return k.isMetaPressed || k.isControlPressed;
+  }
+
+  /// ⌘クリックで、そのノードを選択に足す／選択から外す。
+  /// 複数選択モードでなければ自動で入り、そのとき青く選んでいたノードも選択に含める。
+  void _toggleNodeInSelection(GsnNode node) {
+    final single = _connecting;
+    _cancelConnecting();
+    setState(() {
+      if (!_selectionMode) {
+        _selectionMode = true;
+        _selectionByModifier = true;
+        _selectedNodeIds.clear();
+        if (single != null && single != node.id) _selectedNodeIds.add(single);
+      }
+      if (!_selectedNodeIds.remove(node.id)) _selectedNodeIds.add(node.id);
+      // 自動で入ったモードで選択が空になったら、普段の操作に戻る
+      if (_selectionByModifier && _selectedNodeIds.isEmpty) {
+        _selectionMode = false;
+        _selectionByModifier = false;
+      }
+    });
+  }
+
+  /// 自動で入った複数選択モードを抜けて、普段の操作に戻る。
+  void _leaveModifierSelection() {
+    setState(() {
+      _selectionMode = false;
+      _selectionByModifier = false;
+      _selectedNodeIds.clear();
+      _selectionRectStart = null;
+      _selectionRectEnd = null;
+    });
+  }
+
   void _handleTapNode(GsnNode node) {
     if (_deleteMode) {
       _confirmDeleteNode(node);
@@ -1430,7 +1473,12 @@ class _GsnEditorState extends State<GsnEditor> {
         if (_clipboard.isEmpty) return false;
         _cancelConnecting();
         // 貼り付けたノードが選択された状態で見えるよう、複数選択モードにする
-        if (!_selectionMode) setState(() => _selectionMode = true);
+        if (!_selectionMode) {
+          setState(() {
+            _selectionMode = true;
+            _selectionByModifier = true;
+          });
+        }
         _pasteClipboard();
         return true;
       case EditorShortcut.selectAll:
@@ -1438,6 +1486,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _cancelConnecting();
         final hidden = _computeHiddenNodeIds();
         setState(() {
+          if (!_selectionMode) _selectionByModifier = true;
           _selectionMode = true;
           _deleteMode = false;
           _selectedNodeIds
@@ -1693,7 +1742,7 @@ class _GsnEditorState extends State<GsnEditor> {
                       color: _selectionMode ? Colors.orange : null,
                     ),
                     onPressed: _toggleSelectionMode,
-                    tooltip: '複数選択モード切替（${shortcutLabel(EditorShortcut.selectAll)} で全て選択、Esc で終了）',
+                    tooltip: '複数選択モード切替（${shortcutLabel(EditorShortcut.selectAll)} で全て選択、${shortcutLabel(EditorShortcut.selectAll).replaceAll('A', '')}クリックで追加、Esc で終了）',
                   ),
                   IconButton(
                     icon: Icon(
@@ -1766,7 +1815,11 @@ class _GsnEditorState extends State<GsnEditor> {
                   // 選択モード中に空白部分をタップしたら選択解除
                   // (ノード上のタップはノード側のGestureDetectorが勝つためここには来ない)
                   if (_selectionMode) {
-                    _clearSelection();
+                    if (_selectionByModifier) {
+                      _leaveModifierSelection();
+                    } else {
+                      _clearSelection();
+                    }
                   }
                 },
                 // ★追加(接続キャンセル): 右クリックで接続待ちを解除する。
@@ -1904,7 +1957,15 @@ class _GsnEditorState extends State<GsnEditor> {
                                   _toggleCollapse(node.id);
                                   return;
                                 }
-                                if (_selectionMode) {
+                                // ⌘クリック（Ctrl クリック）は Finder と同じく選択の足し引き
+                                if (!_deleteMode && _multiSelectKeyPressed) {
+                                  _toggleNodeInSelection(node);
+                                } else if (_selectionMode &&
+                                    _selectionByModifier) {
+                                  // 修飾キーなしのクリックは、そのノードだけを選んだ普段の状態に戻る
+                                  _leaveModifierSelection();
+                                  _handleTapNode(node);
+                                } else if (_selectionMode) {
                                   setState(() {
                                     if (_selectedNodeIds.contains(node.id)) {
                                       _selectedNodeIds.remove(node.id);
