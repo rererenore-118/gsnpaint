@@ -323,6 +323,75 @@ bool hasSupportingChild(GsnNode node, List<GsnNode> nodes, Iterable<GsnEdge> edg
 bool wouldDecomposeAwayGoal(GsnNode parent, GsnNode child) =>
     parent.type == GsnNodeType.awayGoal && !_allSideTypes.contains(child.type);
 
+// 子を持たない要素。評価（build_gsn.py）はこれらの子をすべて捨てる。
+// GSN v3 でも Context / Assumption / Justification は InContextOf の先で、さらに子を持たない。
+const Set<GsnNodeType> _leafTypes = {
+  ..._sideAttachedTypes,
+  GsnNodeType.undeveloped,
+};
+
+// Defeater だけを子に取れる要素。中身の論証を持たない（Away Solution は参照先にある）。
+const Set<GsnNodeType> _defeaterOnlyParents = {
+  GsnNodeType.evidence,
+  GsnNodeType.awaySolution,
+};
+
+// Strategy の下に付けられる要素。build_gsn.py が sub_goals として使う種類と、横に付く要素。
+// これ以外（String、Lambda など）は評価で黙って捨てられる。
+const Set<GsnNodeType> _strategyChildTypes = {
+  GsnNodeType.goal,
+  GsnNodeType.awayGoal,
+  GsnNodeType.strategy,
+  GsnNodeType.evidence,
+  GsnNodeType.awaySolution,
+  GsnNodeType.undeveloped,
+  GsnNodeType.application,
+  GsnNodeType.map,
+  GsnNodeType.recordAccess,
+  GsnNodeType.x,
+  ..._allSideTypes,
+};
+
+/// parent → child の線を引けるか。引けないときは画面に出す理由を、引けるときは null を返す。
+/// 評価で使われない線（黙って捨てられる線）と、評価が止まらなくなる輪を作らせない。
+/// λ 系（Lambda・Application・Map・Record など）の下は、評価側の構造に任せて調べない。
+String? connectionBlockedReason(
+    GsnNode parent, GsnNode child, Iterable<GsnEdge> edges) {
+  String name(GsnNodeType t) => GsnNode._displayName(t);
+  if (parent.id == child.id) return '自分自身にはつなげません。';
+  if (edges.any((e) => e.fromId == parent.id && e.toId == child.id)) {
+    return 'この 2 つはすでにつながっています。';
+  }
+  // child から下へたどって parent に着くなら、つなぐと輪になる
+  final seen = <int>{};
+  final stack = [child.id];
+  while (stack.isNotEmpty) {
+    final id = stack.removeLast();
+    if (id == parent.id) {
+      return 'つなぐと線が輪になり、評価できなくなります。';
+    }
+    if (!seen.add(id)) continue;
+    for (final e in edges) {
+      if (e.fromId == id) stack.add(e.toId);
+    }
+  }
+  if (wouldDecomposeAwayGoal(parent, child)) {
+    return 'Away Goal の下に支える子は付けられません。論証は参照先の図に書きます。';
+  }
+  if (_leafTypes.contains(parent.type)) {
+    return '${name(parent.type)} の下には何も付けられません。';
+  }
+  if (_defeaterOnlyParents.contains(parent.type) &&
+      child.type != GsnNodeType.defeater) {
+    return '${name(parent.type)} の下に付けられるのは Defeater だけです。';
+  }
+  if (parent.type == GsnNodeType.strategy &&
+      !_strategyChildTypes.contains(child.type)) {
+    return 'Strategy の下に ${name(child.type)} は付けられません。';
+  }
+  return null;
+}
+
 // エッジの向きは from（親）→ to（子）。Flaskへ送る際も同じ向きで送信する。
 class GsnEdge {
   final int fromId;
@@ -1413,13 +1482,13 @@ class _GsnEditorState extends State<GsnEditor> {
             (_lastTapDownLocalPos ?? Offset(node.width / 2, node.height / 2));
       } else if (_connecting != node.id) {
         final parent = _nodes.firstWhere((n) => n.id == _connecting);
-        if (wouldDecomposeAwayGoal(parent, node)) {
+        // つなぎ方のルールに合わない線は引かせない（評価で黙って捨てられるため）
+        final blocked = connectionBlockedReason(parent, node, _edges);
+        if (blocked != null) {
           _cancelConnecting();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Away Goal の下に支える子は付けられません。論証は参照先の図に書きます。'),
-            ),
-          );
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(content: Text(blocked)));
           return;
         }
         _saveToHistory();
@@ -1434,8 +1503,6 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  // Delete / Backspace キーで、複数選択中の選択か、光っているノードを確認なしで消す。
-  // 消せるものがなければ false を返す。
   /// キーボードショートカットを実行する。何もしなかったときは false を返し、
   /// ブラウザ側の既定の動作に任せる。
   bool _runShortcut(EditorShortcut shortcut) {
@@ -1510,6 +1577,8 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
+  // Delete / Backspace キーで、複数選択中の選択か、光っているノードを確認なしで消す。
+  // 消せるものがなければ false を返す。
   bool _deleteByKey() {
     final String message;
     if (_selectionMode && _selectedNodeIds.isNotEmpty) {
