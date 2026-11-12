@@ -73,6 +73,7 @@ enum GsnNodeType {
   awayContext, // 別のモジュールの Context を参照する要素
   awayAssumption, // 別のモジュールの Assumption を参照する要素
   awayJustification, // 別のモジュールの Justification を参照する要素
+  moduleReference, // ★追加(GSN v3 1:4.2): 参照先のモジュールの論証全体を指す要素
   recordAccess,
   lambda,
   application,
@@ -256,7 +257,8 @@ class GsnNode {
 
   // 画面に出す要素の名前。PGSN に合わせて保存形式と同じ名前（Evidence など）を使う。
   // （GSN の規格では Evidence にあたる要素を Solution と呼ぶが、画面も Evidence にそろえる）
-  static String _displayName(GsnNodeType t) => _gsnTypeName(t);
+  static String _displayName(GsnNodeType t) =>
+      t == GsnNodeType.moduleReference ? 'Module Reference' : _gsnTypeName(t);
 
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
@@ -287,6 +289,8 @@ class GsnNode {
         return 'AwayAssumption';
       case GsnNodeType.awayJustification:
         return 'AwayJustification';
+      case GsnNodeType.moduleReference:
+        return 'ModuleReference';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -328,6 +332,8 @@ bool wouldDecomposeAwayGoal(GsnNode parent, GsnNode child) =>
 const Set<GsnNodeType> _leafTypes = {
   ..._sideAttachedTypes,
   GsnNodeType.undeveloped,
+  // 論証は参照先のモジュールにあるので、参照元の図では下に何も付けない
+  GsnNodeType.moduleReference,
 };
 
 // Defeater だけを子に取れる要素。中身の論証を持たない（Away Solution は参照先にある）。
@@ -344,6 +350,7 @@ const Set<GsnNodeType> _strategyChildTypes = {
   GsnNodeType.strategy,
   GsnNodeType.evidence,
   GsnNodeType.awaySolution,
+  GsnNodeType.moduleReference,
   GsnNodeType.undeveloped,
   GsnNodeType.application,
   GsnNodeType.map,
@@ -391,6 +398,14 @@ String? connectionBlockedReason(
   }
   return null;
 }
+
+// 別の図（モジュール）を参照する要素か。Away 要素と Module Reference。
+bool _refersToModuleType(GsnNodeType t) =>
+    _awayTargetTypes.containsKey(t) || t == GsnNodeType.moduleReference;
+
+// 参照先のモジュール名が入っていて、評価の前に読み込む必要がある要素か。
+bool _refersToModule(GsnNode n) =>
+    _refersToModuleType(n.type) && n.module.isNotEmpty;
 
 // エッジの向きは from（親）→ to（子）。Flaskへ送る際も同じ向きで送信する。
 class GsnEdge {
@@ -737,8 +752,7 @@ class _GsnEditorState extends State<GsnEditor> {
 
     // ★追加(GSN v3 モジュール拡張): Away Goal の参照先（アカウントに保存した図）を読む準備。
     // ログインしていない・鍵の解除をやめた場合、確認だけなら「未確認」として評価は続ける。
-    final usesModules =
-        _nodes.any((n) => _awayTargetTypes.containsKey(n.type) && n.module.isNotEmpty);
+    final usesModules = _nodes.any(_refersToModule);
     ModuleResolver? resolver;
     if (usesModules && _cloudBlockedReason == null && await _ensureUnlocked()) {
       resolver = ModuleResolver.cloud(_cloudService);
@@ -834,9 +848,7 @@ class _GsnEditorState extends State<GsnEditor> {
     // ★追加(GSN v3 モジュール拡張): 評価結果に残った Away Goal の参照先を確かめる。
     // {X} が置き換わったあとの文面で照合したいので、評価の後に行う。
     for (final n in resultNodes) {
-      if (_awayTargetTypes.containsKey(n.type) && n.module.isNotEmpty) {
-        n.awayStatus = AwayStatus.notChecked;
-      }
+      if (_refersToModule(n)) n.awayStatus = AwayStatus.notChecked;
     }
     if (resolver != null) {
       try {
@@ -1271,6 +1283,9 @@ class _GsnEditorState extends State<GsnEditor> {
         id: _nodeCounter++,
         type: type,
         position: _snapToGrid(position),
+        // Module Reference はモジュール名と説明を両方書くので少し大きめにする
+        width: type == GsnNodeType.moduleReference ? 160 : 100,
+        height: type == GsnNodeType.moduleReference ? 70 : 60,
         label: (type == GsnNodeType.record ||
                               type == GsnNodeType.x ||
                               type == GsnNodeType.undeveloped)
@@ -2276,9 +2291,10 @@ class _GsnEditorState extends State<GsnEditor> {
         typeName: GsnNode._displayName(baseType),
         initialLabel: node.label,
         initialModule: node.module,
-        initialIsAway: _awayTargetTypes.containsKey(node.type),
+        initialIsAway: _refersToModuleType(node.type),
         initialIsPublic: node.public,
         initialIsUndeveloped: node.undeveloped,
+        isModuleReference: node.type == GsnNodeType.moduleReference,
         canReference: awayType != null,
         canBePublic: awayType != null,
         canBeUndeveloped: canBeUndeveloped,
@@ -2840,6 +2856,22 @@ Widget _buildGsnShapeWidget(GsnNode node,
         child: awayElement,
       );
 
+    case GsnNodeType.moduleReference:
+      final moduleRef = CustomPaint(
+        size: Size(node.width, node.height),
+        painter: ModuleReferencePainter(
+            label: node.label,
+            module: node.module,
+            status: node.awayStatus,
+            isPalette: isPalette),
+      );
+      final refStatus = node.awayStatus;
+      if (refStatus == null) return moduleRef;
+      return Tooltip(
+        message: '参照先「${node.module}」：${_awayStatusText(refStatus)}',
+        child: moduleRef,
+      );
+
     case GsnNodeType.x:
       return buildPainter(XPainter());
 
@@ -2903,6 +2935,12 @@ class GsnPalette extends StatefulWidget {
         GsnNodeType.assumption,
         GsnNodeType.justification,
         GsnNodeType.defeater, // ★追加(Defeater)
+      ],
+    ),
+    _PaletteGroup(
+      label: 'モジュール',
+      types: [
+        GsnNodeType.moduleReference,
       ],
     ),
     _PaletteGroup(
@@ -3101,14 +3139,18 @@ class _PaletteItem extends StatelessWidget {
             shapeWidget,
             const SizedBox(height: 4), // 図形と文字の間隔
             // 文字部分
-            Text(
-              GsnNode._displayName(type),
-              style: const TextStyle(
-                fontSize: 11,
-                color: Colors.black87,
-                fontWeight: FontWeight.w500,
+            SizedBox(
+              width: 84,
+              child: Text(
+                GsnNode._displayName(type),
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Colors.black87,
+                  fontWeight: FontWeight.w500,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -4135,6 +4177,86 @@ class AwayElementPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant AwayElementPainter oldDelegate) =>
       oldDelegate.type != type ||
+      oldDelegate.label != label ||
+      oldDelegate.module != module ||
+      oldDelegate.status != status ||
+      oldDelegate.isPalette != isPalette;
+}
+
+// ★追加(GSN v3 1:4.2): Module Reference。左上に小さな長方形が付いた長方形（モジュールの記号）。
+// 上の段にモジュール名、その下に説明を書く。評価結果では参照先の状態を右上に記号で示す。
+class ModuleReferencePainter extends CustomPainter {
+  final String label;
+  final String module;
+  final AwayStatus? status;
+  final bool isPalette;
+  ModuleReferencePainter(
+      {required this.label,
+      required this.module,
+      this.status,
+      this.isPalette = false});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final tabH = isPalette ? 7.0 : 10.0;
+    final tabW = min(size.width * 0.35, isPalette ? 26.0 : 44.0);
+    final body = Rect.fromLTWH(0, tabH, size.width, size.height - tabH);
+    final tab = Rect.fromLTWH(0, 0, tabW, tabH);
+    final fillColor = switch (status) {
+      AwayStatus.ok => Colors.green.shade50,
+      null || AwayStatus.notChecked => Colors.orange.shade50,
+      _ => Colors.red.shade50,
+    };
+    final fill = Paint()..color = fillColor;
+    final border = Paint()
+      ..color = Colors.black
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    canvas.drawRect(tab, fill);
+    canvas.drawRect(tab, border);
+    canvas.drawRect(body, fill);
+    canvas.drawRect(body, border);
+    if (isPalette) return;
+
+    final moduleTp = TextPainter(
+      text: TextSpan(
+        text: module.isEmpty ? 'モジュール未設定' : module,
+        style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            color: module.isEmpty ? Colors.black38 : Colors.black87),
+      ),
+      maxLines: 1,
+      ellipsis: '…',
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: max(0.0, size.width - (status == null ? 12 : 28)));
+    moduleTp.paint(canvas, Offset(6, body.top + 3));
+    if (status != null) {
+      AwayElementPainter._paintStatusIcon(
+          canvas, Rect.fromLTWH(0, body.top, size.width, moduleTp.height + 6), status!);
+    }
+
+    if (label.isNotEmpty) {
+      final top = body.top + moduleTp.height + 6;
+      final area = Rect.fromLTWH(0, top, size.width, max(0.0, body.bottom - top));
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(fontSize: 12, color: Colors.black),
+        ),
+        textAlign: TextAlign.center,
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: max(0.0, size.width - 12));
+      canvas.save();
+      canvas.clipRect(area);
+      tp.paint(canvas,
+          Offset((size.width - tp.width) / 2, area.top + (area.height - tp.height) / 2));
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant ModuleReferencePainter oldDelegate) =>
       oldDelegate.label != label ||
       oldDelegate.module != module ||
       oldDelegate.status != status ||

@@ -1,18 +1,22 @@
-// GSN v3 モジュール拡張: Away 要素（Goal / Solution / Context / Assumption / Justification）が
-// 参照するモジュールを解決する。
+// GSN v3 モジュール拡張: Away 要素（Goal / Evidence / Context / Assumption / Justification）と
+// Module Reference が参照するモジュールを解決する。
 //
+// Away 要素は参照先の公開された 1 つの要素を、Module Reference は参照先のモジュールの論証全体
+// （トップゴールから下）を指す。
 // モジュールはアカウントに保存した図（名前で引く）で、Away 要素から参照できるのは
 // 「公開」の印を付けた同じ種類の要素だけ。説明文が一致するものを参照先とみなす。
 // 評価用Python は Firestore を読めないので、参照先の読み込みと照合はすべてここで行う。
 part of 'main.dart';
 
-enum AwayStatus { ok, moduleMissing, goalMissing, notPublic, notChecked }
+enum AwayStatus { ok, moduleMissing, goalMissing, notPublic, noTopGoal, manyTopGoals, notChecked }
 
 String _awayStatusText(AwayStatus s) => switch (s) {
       AwayStatus.ok => '参照OK',
       AwayStatus.moduleMissing => '図がありません',
       AwayStatus.goalMissing => '参照先の要素が見つかりません',
       AwayStatus.notPublic => '公開されていません',
+      AwayStatus.noTopGoal => 'トップの Goal がありません',
+      AwayStatus.manyTopGoals => 'トップの Goal が 1 つに決まりません',
       AwayStatus.notChecked => '未確認',
     };
 
@@ -67,6 +71,26 @@ class ModuleResolver {
     return (AwayStatus.ok, public.first, graph);
   }
 
+  /// Module Reference の参照先: モジュールのトップゴール（親を持たない Goal）。
+  /// 論証全体を指すので「公開」の印は問わない。トップゴールがちょうど 1 つのときだけ見つかったとする。
+  Future<(AwayStatus, GsnNode?, ModuleGraph?)> findTopGoal(String module) async {
+    final graph = await _load(module);
+    if (graph == null) return (AwayStatus.moduleMissing, null, null);
+    final children = {for (final e in graph.edges) e.toId};
+    final tops = graph.nodes
+        .where((n) => n.type == GsnNodeType.goal && !children.contains(n.id))
+        .toList();
+    if (tops.isEmpty) return (AwayStatus.noTopGoal, null, graph);
+    if (tops.length > 1) return (AwayStatus.manyTopGoals, null, graph);
+    return (AwayStatus.ok, tops.single, graph);
+  }
+
+  // 参照する要素の種類に応じて、参照先を探す
+  Future<(AwayStatus, GsnNode?, ModuleGraph?)> _findFor(GsnNode n) {
+    if (n.type == GsnNodeType.moduleReference) return findTopGoal(n.module);
+    return find(n.module, n.label, _awayTargetTypes[n.type]!);
+  }
+
   /// モジュールの公開された要素の説明文の一覧（Away 要素の編集で選べるようにする）。図が無ければ null。
   Future<List<String>?> publicClaims(String module,
       {GsnNodeType targetType = GsnNodeType.goal}) async {
@@ -77,17 +101,17 @@ class ModuleResolver {
         .toList();
   }
 
-  /// 評価結果の Away 要素それぞれに、参照先が見つかるかどうかを付ける
+  /// 評価結果の Away 要素と Module Reference それぞれに、参照先が見つかるかどうかを付ける
   Future<void> check(List<GsnNode> nodes) async {
     for (final n in nodes) {
-      final targetType = _awayTargetTypes[n.type];
-      if (targetType == null || n.module.isEmpty) continue;
-      n.awayStatus = (await find(n.module, n.label, targetType)).$1;
+      if (!_refersToModule(n)) continue;
+      n.awayStatus = (await _findFor(n)).$1;
     }
   }
 
-  /// Away 要素を、参照先の公開された要素とその下の部分木に置き換えた図を返す。元の図は変えない。
-  /// 参照先が見つからない Away 要素はそのまま残す（評価のあとの check() で理由が分かる）。
+  /// Away 要素を参照先の公開された要素とその下の部分木に、Module Reference を参照先の
+  /// トップゴールから下の論証全体に置き換えた図を返す。元の図は変えない。
+  /// 参照先が見つからない要素はそのまま残す（評価のあとの check() で理由が分かる）。
   Future<ModuleGraph> inlineAll(List<GsnNode> nodes, List<GsnEdge> edges) {
     _nextId = nodes.fold(0, (m, n) => max(m, n.id)) + 1;
     return _inline(nodes, edges, {});
@@ -101,10 +125,9 @@ class ModuleResolver {
     var outEdges = List<GsnEdge>.of(edges);
 
     for (final away in nodes) {
-      final targetType = _awayTargetTypes[away.type];
-      if (targetType == null || away.module.isEmpty) continue;
+      if (!_refersToModule(away)) continue;
       if (visiting.contains(away.module)) continue;
-      final (status, target, graph) = await find(away.module, away.label, targetType);
+      final (status, target, graph) = await _findFor(away);
       if (status != AwayStatus.ok) continue;
 
       // 公開された要素から下の部分木を、新しい id に付け替えて取り出す

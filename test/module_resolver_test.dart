@@ -46,7 +46,24 @@ void main() {
   ], [
     GsnEdge(5, 6),
   ]);
-  final modules = {'SW': sw, 'A': a, 'B': b};
+  // モジュール「HW」: トップゴールが 1 つ（公開の印は無くてよい）。「空」はトップゴールが無い
+  final hw = diagram([
+    node(0, GsnNodeType.goal, 'HW は安全'),
+    node(1, GsnNodeType.context, 'HW の範囲'),
+    node(2, GsnNodeType.evidence, 'HW 試験結果'),
+  ], [
+    GsnEdge(0, 1),
+    GsnEdge(0, 2),
+  ]);
+  final empty = diagram([node(0, GsnNodeType.strategy, '戦略だけ')], []);
+  // モジュール「C」は Module Reference で自分自身を参照する（循環）
+  final c = diagram([
+    node(0, GsnNodeType.goal, 'C は安全'),
+    node(1, GsnNodeType.moduleReference, 'C の論証', module: 'C'),
+  ], [
+    GsnEdge(0, 1),
+  ]);
+  final modules = {'SW': sw, 'A': a, 'B': b, 'HW': hw, '空': empty, 'C': c};
   var loads = 0;
   ModuleResolver resolver() => ModuleResolver((name) async {
         loads++;
@@ -170,5 +187,59 @@ void main() {
       'goal:B は安全',
       'awayGoal:A は安全',
     });
+  });
+
+  test('Module Reference はトップゴールが 1 つのモジュールだけを参照できる', () async {
+    final nodes = [
+      node(0, GsnNodeType.moduleReference, 'HW の論証', module: 'HW'),
+      node(1, GsnNodeType.moduleReference, 'SW の論証', module: 'SW'),
+      node(2, GsnNodeType.moduleReference, '空の論証', module: '空'),
+      node(3, GsnNodeType.moduleReference, '無い', module: '無い図'),
+      node(4, GsnNodeType.moduleReference, 'モジュール名なし'),
+    ];
+    await resolver().check(nodes);
+    expect(nodes.map((n) => n.awayStatus), [
+      AwayStatus.ok,
+      AwayStatus.manyTopGoals,
+      AwayStatus.noTopGoal,
+      AwayStatus.moduleMissing,
+      null,
+    ]);
+  });
+
+  test('Module Reference は参照先のトップゴールから下の論証全体に置き換わる', () async {
+    final nodes = [
+      node(0, GsnNodeType.goal, 'システムは安全'),
+      node(1, GsnNodeType.strategy, '部品ごとに'),
+      node(2, GsnNodeType.moduleReference, 'HW の論証', module: 'HW'),
+    ];
+    final edges = [GsnEdge(0, 1), GsnEdge(1, 2)];
+    final merged = await resolver().inlineAll(nodes, edges);
+    final labels = {for (final n in merged.nodes) n.id: n.label};
+    expect(merged.nodes.any((n) => n.type == GsnNodeType.moduleReference), isFalse);
+    expect(labels.values, containsAll(['HW は安全', 'HW の範囲', 'HW 試験結果']));
+    final hwTop = merged.nodes.firstWhere((n) => n.label == 'HW は安全').id;
+    // Strategy の下に、参照先のトップゴールがつながる
+    expect(merged.edges.any((e) => e.fromId == 1 && e.toId == hwTop), isTrue);
+    expect(merged.edges.where((e) => e.fromId == hwTop).length, 2);
+    // 元の図は変えない
+    expect(nodes.length, 3);
+  });
+
+  test('自分自身を参照する Module Reference は 1 回だけ差し込んで止まる', () async {
+    final nodes = [node(0, GsnNodeType.moduleReference, 'C の論証', module: 'C')];
+    final merged = await resolver().inlineAll(nodes, []);
+    expect(merged.nodes.where((n) => n.label == 'C は安全').length, 1);
+    expect(merged.nodes.where((n) => n.type == GsnNodeType.moduleReference).length, 1);
+  });
+
+  test('Module Reference の下には何も付けられず、Strategy の下には付けられる', () {
+    final ref = node(1, GsnNodeType.moduleReference, 'm', module: 'M');
+    expect(connectionBlockedReason(ref, node(2, GsnNodeType.goal, 'g'), []),
+        contains('何も付けられません'));
+    expect(connectionBlockedReason(node(0, GsnNodeType.strategy, 's'), ref, []), isNull);
+    expect(connectionBlockedReason(node(0, GsnNodeType.goal, 'g'), ref, []), isNull);
+    expect(GsnNode.fromJson(ref.toJson()).type, GsnNodeType.moduleReference);
+    expect(ref.toJson()['gsn_type'], 'ModuleReference');
   });
 }

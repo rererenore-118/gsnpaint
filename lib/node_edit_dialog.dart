@@ -31,6 +31,10 @@ class NodeEditDialog extends StatefulWidget {
 
   /// 「別の図を参照する」を出すか。参照先になれる種類の要素だけ true。
   final bool canReference;
+
+  /// Module Reference（参照先のモジュールの論証全体を指す要素）。常に参照先を入れる欄を出し、
+  /// 切り替えや公開・未展開の欄は出さない。
+  final bool isModuleReference;
   final bool canBePublic;
   final bool canBeUndeveloped;
 
@@ -53,6 +57,7 @@ class NodeEditDialog extends StatefulWidget {
     this.initialIsPublic = false,
     this.initialIsUndeveloped = false,
     this.canReference = false,
+    this.isModuleReference = false,
     this.canBePublic = false,
     this.canBeUndeveloped = false,
     this.referenceBlockedReason,
@@ -70,7 +75,7 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
       TextEditingController(text: widget.initialLabel);
   late final TextEditingController _moduleCtl =
       TextEditingController(text: widget.initialModule);
-  late bool _isAway = widget.initialIsAway;
+  late bool _isAway = widget.initialIsAway || widget.isModuleReference;
   late bool _isPublic = widget.initialIsPublic;
   late bool _isUndeveloped = widget.initialIsUndeveloped;
 
@@ -108,7 +113,9 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
     if (name != null) _moduleCtl.text = name;
   }
 
-  String get _labelText => widget.typeName == 'Goal'
+  String get _labelText => widget.isModuleReference
+      ? '説明（参照先のモジュールが論じていること）'
+      : widget.typeName == 'Goal'
       ? '主張（参照先のゴールと同じ文面）'
       : '説明（参照先の ${widget.typeName} と同じ文面）';
 
@@ -117,7 +124,7 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
     // 普通の要素から Away への切り替えだけを止める。すでに Away なら外せる。
     final blockedReason = _isAway ? null : widget.referenceBlockedReason;
     final chips = <Widget>[
-      if (widget.canReference)
+      if (widget.canReference && !widget.isModuleReference)
         FilterChip(
           label: const Text('別の図を参照'),
           tooltip: 'この要素の内容は別の図にある（Away ${widget.typeName}）',
@@ -144,7 +151,11 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
     return AlertDialog(
       // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
       scrollable: true,
-      title: Text(_isAway ? 'Away ${widget.typeName} の編集' : 'ノード名編集'),
+      title: Text(widget.isModuleReference
+          ? 'Module Reference の編集'
+          : _isAway
+              ? 'Away ${widget.typeName} の編集'
+              : 'ノード名編集'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -154,7 +165,8 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
             decoration: _isAway
                 ? InputDecoration(
                     labelText: _labelText,
-                    suffixIcon: IconButton(
+                    // Module Reference は特定の要素を指さないので、公開要素から選ぶボタンは出さない
+                    suffixIcon: widget.isModuleReference ? null : IconButton(
                       icon: const Icon(Icons.list),
                       tooltip: '参照先の公開 ${widget.typeName} から選ぶ',
                       onPressed: _pickClaim,

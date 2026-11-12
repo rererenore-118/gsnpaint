@@ -176,6 +176,11 @@ void _paintNodeToCanvas(Canvas canvas, GsnNode node,
     case GsnNodeType.defeater:
       painter = DefeaterPainter(backed: defeaterBacked);
       break;
+    case GsnNodeType.moduleReference:
+      painter = ModuleReferencePainter(
+          label: node.label, module: node.module, status: node.awayStatus);
+      drawLabel = false;
+      break;
     case GsnNodeType.awayGoal:
     case GsnNodeType.awaySolution:
     case GsnNodeType.awayContext:

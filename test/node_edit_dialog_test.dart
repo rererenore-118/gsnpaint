@@ -171,4 +171,28 @@ void main() {
     await save(tester);
     expect(results.single, isNull);
   });
+
+  testWidgets('Module Reference は参照先の欄を常に出し、切り替えの欄は出さない', (tester) async {
+    final results = await open(
+      tester,
+      NodeEditDialog(
+        typeName: 'Module Reference',
+        initialLabel: '',
+        isModuleReference: true,
+        pickModule: () async => 'HW',
+      ),
+    );
+    expect(find.text('Module Reference の編集'), findsOneWidget);
+    expect(find.byType(FilterChip), findsNothing);
+    expect(find.byIcon(Icons.list), findsNothing);
+    await tester.enterText(find.byType(TextField).first, 'HW の論証');
+    await tester.tap(find.byIcon(Icons.folder_special));
+    await tester.pumpAndSettle();
+    await save(tester);
+    final r = results.single!;
+    expect(r.label, 'HW の論証');
+    expect(r.isAway, isTrue);
+    expect(r.module, 'HW');
+    expect(r.isPublic, isFalse);
+  });
 }
