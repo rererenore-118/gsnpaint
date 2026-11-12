@@ -155,9 +155,9 @@ void main() {
     expect(await r().publicClaims('M', targetType: GsnNodeType.context), ['運用環境']);
   });
 
-  test('Evidence は画面では Solution と表示し、保存形式は Evidence のまま', () {
+  test('Evidence は画面でも保存形式でも Evidence と呼ぶ', () {
     final n = GsnNode(id: 0, type: GsnNodeType.evidence, position: Offset.zero);
-    expect(n.label, 'Solution');
+    expect(n.label, 'Evidence');
     expect(n.toJson()['gsn_type'], 'Evidence');
   });
 

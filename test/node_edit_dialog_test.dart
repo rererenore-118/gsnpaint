@@ -134,7 +134,7 @@ void main() {
     final results = await open(
       tester,
       NodeEditDialog(
-        typeName: 'Solution',
+        typeName: 'Evidence',
         initialLabel: '仮',
         initialIsAway: true,
         canReference: true,
@@ -145,7 +145,7 @@ void main() {
         },
       ),
     );
-    expect(find.text('説明（参照先の Solution と同じ文面）'), findsOneWidget);
+    expect(find.text('説明（参照先の Evidence と同じ文面）'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.folder_special));
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.list));

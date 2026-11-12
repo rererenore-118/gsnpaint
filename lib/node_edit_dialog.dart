@@ -21,7 +21,7 @@ class NodeEditResult {
 }
 
 class NodeEditDialog extends StatefulWidget {
-  /// 要素の種類の表示名（Goal、Solution など）。Away かどうかには関係しない。
+  /// 要素の種類の表示名（Goal、Evidence など）。Away かどうかには関係しない。
   final String typeName;
   final String initialLabel;
   final String initialModule;

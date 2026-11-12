@@ -69,7 +69,7 @@ enum GsnNodeType {
   defeater, // ★追加: Confidence Argument対応。GSNノードへの疑義(反論)を表すノード
             // （PGSN v0.0.4以降はGoal/Strategy/Evidence/Defeaterのどれにも付けられる）
   awayGoal, // ★追加(GSN v3 モジュール拡張): 別のモジュールで論じられている主張を参照するゴール
-  awaySolution, // 別のモジュールの Solution（エディタの Evidence）を参照する要素
+  awaySolution, // 別のモジュールの Evidence（GSN の規格では Solution）を参照する要素
   awayContext, // 別のモジュールの Context を参照する要素
   awayAssumption, // 別のモジュールの Assumption を参照する要素
   awayJustification, // 別のモジュールの Justification を参照する要素
@@ -254,10 +254,9 @@ class GsnNode {
         if (public) 'public': true,
       };
 
-  // 画面に出す要素の名前。GSN の規格では Evidence にあたる要素を Solution と呼ぶ。
-  // 保存形式と評価用Pythonへ渡す名前は PGSN に合わせて _gsnTypeName() の Evidence のまま。
-  static String _displayName(GsnNodeType t) =>
-      t == GsnNodeType.evidence ? 'Solution' : _gsnTypeName(t);
+  // 画面に出す要素の名前。PGSN に合わせて保存形式と同じ名前（Evidence など）を使う。
+  // （GSN の規格では Evidence にあたる要素を Solution と呼ぶが、画面も Evidence にそろえる）
+  static String _displayName(GsnNodeType t) => _gsnTypeName(t);
 
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
