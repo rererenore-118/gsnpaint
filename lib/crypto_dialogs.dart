@@ -177,6 +177,8 @@ class _SetupDialogState extends State<_SetupDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('暗号化パスフレーズの設定'),
       content: SizedBox(
         width: 420,
@@ -228,6 +230,8 @@ class _RecoveryKeyDialogState extends State<_RecoveryKeyDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('回復キーを控えてください'),
       content: SizedBox(
         width: 460,
@@ -395,6 +399,8 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   Widget build(BuildContext context) {
     final recovering = _mode == _UnlockMode.recovery;
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: Text(recovering ? '回復キーで解除' : '暗号化の解除'),
       content: SizedBox(
         width: 420,
@@ -521,6 +527,8 @@ class _ResetDialogState extends State<_ResetDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('データを削除して初めからやり直す'),
       content: SizedBox(
         width: 420,
@@ -590,6 +598,8 @@ class _MigrationDialogState extends State<_MigrationDialog> {
   Widget build(BuildContext context) {
     final total = widget.items.length;
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('保存済みのデータを暗号化しています'),
       content: SizedBox(
         width: 380,
@@ -712,6 +722,8 @@ class _CryptoSettingsDialogState extends State<CryptoSettingsDialog> {
   Widget build(BuildContext context) {
     final passkeys = _passkeys;
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('暗号化の設定'),
       content: SizedBox(
         width: 440,
@@ -806,6 +818,8 @@ class _PasskeyLabelDialogState extends State<_PasskeyLabelDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('パスキーを追加'),
       content: SizedBox(
         width: 380,
@@ -879,6 +893,8 @@ class _ChangePassphraseDialogState extends State<_ChangePassphraseDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('パスフレーズを変更'),
       content: SizedBox(
         width: 400,

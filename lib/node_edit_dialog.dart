@@ -142,6 +142,8 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
         ),
     ];
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: Text(_isAway ? 'Away ${widget.typeName} の編集' : 'ノード名編集'),
       content: Column(
         mainAxisSize: MainAxisSize.min,

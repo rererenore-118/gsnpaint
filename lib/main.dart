@@ -28,6 +28,7 @@ import 'crypto_dialogs.dart';
 import 'crypto_service.dart';
 import 'browser_eval.dart';
 import 'node_edit_dialog.dart';
+import 'editor_shortcuts.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -1393,6 +1394,74 @@ class _GsnEditorState extends State<GsnEditor> {
 
   // Delete / Backspace キーで、複数選択中の選択か、光っているノードを確認なしで消す。
   // 消せるものがなければ false を返す。
+  /// キーボードショートカットを実行する。何もしなかったときは false を返し、
+  /// ブラウザ側の既定の動作に任せる。
+  bool _runShortcut(EditorShortcut shortcut) {
+    switch (shortcut) {
+      case EditorShortcut.escape:
+        // 接続待ち → 削除モード → 複数選択モード の順に、いま有効なものを 1 つ解除する
+        if (_connecting != null) {
+          _cancelConnecting();
+        } else if (_deleteMode) {
+          _toggleDeleteMode();
+        } else if (_selectionMode) {
+          _toggleSelectionMode();
+        } else {
+          return false;
+        }
+        return true;
+      case EditorShortcut.delete:
+        return _deleteByKey();
+      case EditorShortcut.undo:
+        if (_undoStack.isEmpty) return false;
+        _cancelConnecting();
+        _undo();
+        return true;
+      case EditorShortcut.redo:
+        if (_redoStack.isEmpty) return false;
+        _cancelConnecting();
+        _redo();
+        return true;
+      case EditorShortcut.copy:
+        if (!_selectionMode || _selectedNodeIds.isEmpty) return false;
+        _copySelected();
+        return true;
+      case EditorShortcut.paste:
+        if (_clipboard.isEmpty) return false;
+        _cancelConnecting();
+        // 貼り付けたノードが選択された状態で見えるよう、複数選択モードにする
+        if (!_selectionMode) setState(() => _selectionMode = true);
+        _pasteClipboard();
+        return true;
+      case EditorShortcut.selectAll:
+        if (_nodes.isEmpty) return false;
+        _cancelConnecting();
+        final hidden = _computeHiddenNodeIds();
+        setState(() {
+          _selectionMode = true;
+          _deleteMode = false;
+          _selectedNodeIds
+            ..clear()
+            ..addAll(_nodes.map((n) => n.id).where((id) => !hidden.contains(id)));
+        });
+        return true;
+      case EditorShortcut.save:
+        // ブラウザの「ページを保存」を出さないよう、常にこちらで受け取る
+        if (!_cloudReady) {
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(const SnackBar(
+              content: Text('アカウントにログインすると、このキーで図を保存できます'),
+            ));
+        } else if (_openCloudName == null) {
+          _saveToCloud();
+        } else {
+          _overwriteCloud();
+        }
+        return true;
+    }
+  }
+
   bool _deleteByKey() {
     final String message;
     if (_selectionMode && _selectedNodeIds.isNotEmpty) {
@@ -1563,29 +1632,19 @@ class _GsnEditorState extends State<GsnEditor> {
       autofocus: true,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
-        final key = event.logicalKey;
-        if (key == LogicalKeyboardKey.escape && _connecting != null) {
-          _cancelConnecting();
-          return KeyEventResult.handled;
-        }
-        // Mac の delete キーは Backspace として届くので両方に反応する。
         // ダイアログの入力中はフォーカスが別のルートにあるので、ここには来ない。
-        if (key == LogicalKeyboardKey.delete ||
-            key == LogicalKeyboardKey.backspace) {
-          return _deleteByKey()
-              ? KeyEventResult.handled
-              : KeyEventResult.ignored;
-        }
         final keyboard = HardwareKeyboard.instance;
-        if (key == LogicalKeyboardKey.keyZ &&
-            (keyboard.isMetaPressed || keyboard.isControlPressed) &&
-            !keyboard.isShiftPressed &&
-            _undoStack.isNotEmpty) {
-          _cancelConnecting();
-          _undo();
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
+        final shortcut = editorShortcutFor(
+          event.logicalKey,
+          meta: keyboard.isMetaPressed,
+          control: keyboard.isControlPressed,
+          shift: keyboard.isShiftPressed,
+          alt: keyboard.isAltPressed,
+        );
+        if (shortcut == null) return KeyEventResult.ignored;
+        return _runShortcut(shortcut)
+            ? KeyEventResult.handled
+            : KeyEventResult.ignored;
       },
       child: Scaffold(
       // 複数選択中の操作は、ツールバーのボタンの位置を動かさないよう画面の下に出す
@@ -1609,18 +1668,18 @@ class _GsnEditorState extends State<GsnEditor> {
                       onPressed: _openCloudName == null ? null : _overwriteCloud,
                       tooltip: _openCloudName == null
                           ? '上書き保存（アカウントから開いた図・保存した図に使えます）'
-                          : '上書き保存（「$_openCloudName」）',
+                          : '上書き保存（「$_openCloudName」） ${shortcutLabel(EditorShortcut.save)}',
                     ),
                   _toolbarDivider(),
                   IconButton(
                     icon: const Icon(Icons.undo),
                     onPressed: _undoStack.isEmpty ? null : _undo,
-                    tooltip: '元に戻す (Undo)',
+                    tooltip: '元に戻す  ${shortcutLabel(EditorShortcut.undo)}',
                   ),
                   IconButton(
                     icon: const Icon(Icons.redo),
                     onPressed: _redoStack.isEmpty ? null : _redo,
-                    tooltip: 'やり直す (Redo)',
+                    tooltip: 'やり直す  ${shortcutLabel(EditorShortcut.redo)}',
                   ),
                   IconButton(
                     icon: const Icon(Icons.account_tree),
@@ -1634,13 +1693,13 @@ class _GsnEditorState extends State<GsnEditor> {
                       color: _selectionMode ? Colors.orange : null,
                     ),
                     onPressed: _toggleSelectionMode,
-                    tooltip: '複数選択モード切替',
+                    tooltip: '複数選択モード切替（${shortcutLabel(EditorShortcut.selectAll)} で全て選択、Esc で終了）',
                   ),
                   IconButton(
                     icon: Icon(
                         _deleteMode ? Icons.delete_forever : Icons.delete_outline),
                     onPressed: _toggleDeleteMode,
-                    tooltip: '削除モード切替',
+                    tooltip: '削除モード切替（Esc で終了。選択中のノードは ${shortcutLabel(EditorShortcut.delete)} キーでも消せます）',
                   ),
                   _toolbarDivider(),
                   _buildEvaluateButton(),
@@ -2695,11 +2754,16 @@ Widget _buildGsnShapeWidget(GsnNode node,
   }
 }
 
-class GsnPalette extends StatelessWidget {
+/// 左のノードパレット。グループの見出しを押すと、そのグループを畳む／開く。
+/// 畳んだグループはブラウザに覚えておき、次に開いたときも畳んだままにする。
+class GsnPalette extends StatefulWidget {
   const GsnPalette({super.key});
 
+  /// 畳んだグループの見出しを保存するキー。
+  static const prefsKey = 'palette_collapsed';
+
   // パレットの表示順とグループ定義
-  static const _groups = [
+  static const groups = [
     _PaletteGroup(
       label: 'GSN',
       types: [
@@ -2739,6 +2803,42 @@ class GsnPalette extends StatelessWidget {
   ];
 
   @override
+  State<GsnPalette> createState() => _GsnPaletteState();
+}
+
+class _GsnPaletteState extends State<GsnPalette> {
+  final Set<String> _collapsed = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCollapsed();
+  }
+
+  Future<void> _loadCollapsed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getStringList(GsnPalette.prefsKey) ?? const [];
+      if (!mounted || saved.isEmpty) return;
+      setState(() => _collapsed.addAll(saved));
+    } catch (_) {
+      // 読めなくても全部開いた状態で使える
+    }
+  }
+
+  Future<void> _toggle(String label) async {
+    setState(() {
+      if (!_collapsed.remove(label)) _collapsed.add(label);
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(GsnPalette.prefsKey, _collapsed.toList());
+    } catch (_) {
+      // 保存できなくても、この画面の間は畳んだまま
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Card(
       elevation: 4,
@@ -2750,25 +2850,67 @@ class GsnPalette extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            for (final group in _groups) ...[
-              // セクションヘッダー
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 2.0),
-                child: Text(
-                  group.label,
-                  style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black54,
-                    letterSpacing: 1.0,
-                  ),
-                ),
+            for (final group in GsnPalette.groups) ...[
+              _PaletteHeader(
+                label: group.label,
+                collapsed: _collapsed.contains(group.label),
+                onTap: () => _toggle(group.label),
               ),
               const Divider(height: 4, thickness: 1),
-              // グループ内のノード
-              for (final type in group.types) _PaletteItem(type: type),
+              // グループ内のノード（畳んでいるときは出さない）
+              if (!_collapsed.contains(group.label))
+                for (final type in group.types) _PaletteItem(type: type),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// グループの見出し。押すと畳む／開く。
+class _PaletteHeader extends StatelessWidget {
+  final String label;
+  final bool collapsed;
+  final VoidCallback onTap;
+  const _PaletteHeader(
+      {required this.label, required this.collapsed, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: collapsed ? '$label を開く' : '$label を畳む',
+      waitDuration: const Duration(milliseconds: 600),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.only(top: 8.0, bottom: 2.0),
+          child: SizedBox(
+            width: 80,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  collapsed ? Icons.chevron_right : Icons.expand_more,
+                  size: 14,
+                  color: Colors.black54,
+                ),
+                Flexible(
+                  child: Text(
+                    label,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black54,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

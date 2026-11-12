@@ -125,6 +125,8 @@ class _AccountDialogState extends State<AccountDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: Text(_isRegisterMode ? 'アカウントを新規登録' : 'ログイン'),
       content: SizedBox(
         width: 360,
@@ -285,6 +287,8 @@ class _AccountInfoDialogState extends State<AccountInfoDialog> {
     final user = _user;
     final verified = user?.emailVerified ?? false;
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('アカウント'),
       content: SizedBox(
         width: 380,

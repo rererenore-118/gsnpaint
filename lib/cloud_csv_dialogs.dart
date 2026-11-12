@@ -38,6 +38,8 @@ class _CsvManagerDialogState extends State<CsvManagerDialog> {
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
+        // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+        scrollable: true,
         title: Text(file.name),
         content: SizedBox(
           width: 560,

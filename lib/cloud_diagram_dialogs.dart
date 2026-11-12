@@ -32,6 +32,8 @@ class _CloudSaveDialogState extends State<CloudSaveDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
+      scrollable: true,
       title: const Text('アカウントに保存'),
       content: SizedBox(
         width: 360,
