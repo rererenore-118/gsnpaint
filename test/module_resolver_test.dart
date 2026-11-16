@@ -242,4 +242,47 @@ void main() {
     expect(GsnNode.fromJson(ref.toJson()).type, GsnNodeType.moduleReference);
     expect(ref.toJson()['gsn_type'], 'ModuleReference');
   });
+
+  test('差し込んだ部分の一番上の要素に、参照先のモジュール名が付く', () async {
+    final nodes = [
+      node(0, GsnNodeType.goal, 'システムは安全'),
+      node(1, GsnNodeType.awayGoal, 'A は安全', module: 'A'),
+      node(2, GsnNodeType.moduleReference, 'HW の論証', module: 'HW'),
+    ];
+    final merged = await resolver().inlineAll(nodes, [GsnEdge(0, 1), GsnEdge(0, 2)]);
+    // A → B → A の循環で残る Away Goal は同じ文面なので、Goal だけを見る
+    final from = {
+      for (final n in merged.nodes)
+        if (n.type != GsnNodeType.awayGoal) n.label: n.inlinedFrom
+    };
+    expect(from['システムは安全'], '');
+    expect(from['A は安全'], 'A');
+    // A の中で差し込んだ B も、それぞれの一番上に付く
+    expect(from['B は安全'], 'B');
+    expect(from['HW は安全'], 'HW');
+    expect(from['HW 試験結果'], '');
+    // 評価結果から読み、保存はしない
+    final json = {...merged.nodes.firstWhere((n) => n.label == 'HW は安全').toJson()};
+    expect(json.containsKey('inlined_from'), isFalse);
+    expect(GsnNode.fromJson({...json, 'inlined_from': 'HW'}).inlinedFrom, 'HW');
+  });
+
+  test('差し込んだ部分ごとに、一番上の要素から下を囲む枠を作る', () {
+    GsnNode at(int id, double x, double y, {String from = ''}) =>
+        GsnNode(id: id, type: GsnNodeType.goal, position: Offset(x, y), width: 100, height: 50)
+          ..inlinedFrom = from;
+    final nodes = [
+      at(0, 200, 0),
+      at(1, 0, 100, from: 'HW'),
+      at(2, 0, 200),
+      at(3, 150, 200, from: '電源'),
+      at(4, 400, 100),
+    ];
+    final edges = [GsnEdge(0, 1), GsnEdge(1, 2), GsnEdge(1, 3), GsnEdge(0, 4)];
+    final frames = inlinedFrames(nodes, edges);
+    expect(frames.map((f) => f.$2), ['HW', '電源']);
+    expect(frames[0].$1, const Rect.fromLTRB(0, 100, 250, 250));
+    expect(frames[1].$1, const Rect.fromLTRB(150, 200, 250, 250));
+    expect(inlinedFrames([at(0, 0, 0)], []), isEmpty);
+  });
 }

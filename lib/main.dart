@@ -185,6 +185,9 @@ class GsnNode {
   bool public;
   // 評価結果の Away 要素に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
   AwayStatus? awayStatus;
+  // 「参照先を差し込んで評価」で差し込んだ部分の一番上の要素に付ける、参照先のモジュール名。
+  // 評価に送るときと評価結果に付いて、結果の画面で境目を描くのに使う。保存はしない。
+  String inlinedFrom = '';
 
   GsnNode({
     required this.id,
@@ -239,7 +242,7 @@ class GsnNode {
       undeveloped: json['undeveloped'] == true,
       module: json['module'] ?? '',
       public: json['public'] == true,
-    );
+    )..inlinedFrom = json['inlined_from'] as String? ?? '';
   }
 
   Map<String, dynamic> toJson() => {
@@ -749,7 +752,26 @@ class _GsnEditorState extends State<GsnEditor> {
   // エディタの状態は変更せず、評価結果を別ダイアログで表示する（非破壊的）。
   // 編集中の図を上書きしないため、GsnResultViewer をダイアログとして開く設計。
   Future<void> _evaluateGsn() async {
+    // 別の図を参照する要素があるときは、結果の画面で「確かめるだけ」と「差し込んで評価」を
+    // 切り替えられるようにする。最初はツールバーの ▼ で選んでいる方で評価する。
+    final usesModules = _nodes.any(_refersToModule);
+    final inline = usesModules && _inlineAwayGoals;
+    final result = await _runEvaluation(inline: inline);
+    if (result == null || !mounted) return;
+    showDialog(
+      context: context,
+      builder: (context) => GsnResultViewer(
+        nodes: result.nodes,
+        edges: result.edges,
+        inlined: usesModules ? inline : null,
+        onEvaluate: usesModules ? (inline) => _runEvaluation(inline: inline) : null,
+      ),
+    );
+  }
 
+  // 今の図を評価して、評価結果の図を返す。失敗したときはエラーを表示して null を返す。
+  // [inline] が true なら、Away 要素と Module Reference を参照先の部分に置き換えてから評価する。
+  Future<ModuleGraph?> _runEvaluation({required bool inline}) async {
     // ★追加(GSN v3 モジュール拡張): Away Goal の参照先（アカウントに保存した図）を読む準備。
     // ログインしていない・鍵の解除をやめた場合、確認だけなら「未確認」として評価は続ける。
     final usesModules = _nodes.any(_refersToModule);
@@ -759,11 +781,11 @@ class _GsnEditorState extends State<GsnEditor> {
     }
     var evalNodes = _nodes;
     var evalEdges = _edges;
-    if (usesModules && _inlineAwayGoals) {
+    if (usesModules && inline) {
       if (resolver == null) {
         _showErrorDialog('Away 要素に参照先を差し込んで評価するには、ログインして暗号化を解除してください。\n'
             '${_cloudBlockedReason ?? ''}');
-        return;
+        return null;
       }
       try {
         final merged = await resolver.inlineAll(_nodes, _edges);
@@ -771,7 +793,7 @@ class _GsnEditorState extends State<GsnEditor> {
         evalEdges = merged.edges;
       } catch (e) {
         _showErrorDialog('Away 要素の参照先を読み込めませんでした: $e');
-        return;
+        return null;
       }
     }
 
@@ -787,6 +809,7 @@ class _GsnEditorState extends State<GsnEditor> {
         "height": n.height,
         if (n.module.isNotEmpty) "module": n.module,
         if (n.undeveloped) "undeveloped": true,
+        if (n.inlinedFrom.isNotEmpty) "inlined_from": n.inlinedFrom,
       }).toList(),
       "edges": evalEdges.map((e) => {"from": e.fromId, "to": e.toId}).toList(),
     };
@@ -801,21 +824,21 @@ class _GsnEditorState extends State<GsnEditor> {
       if (_cloudBlockedReason != null) {
         _showErrorDialog('CSVファイルを使う図の評価には、ログインとメールアドレスの確認が必要です。\n'
             '$_cloudBlockedReason');
-        return;
+        return null;
       }
-      if (!await _ensureUnlocked()) return;
+      if (!await _ensureUnlocked()) return null;
       try {
         final contents = await _csvService.loadContents(csvNames);
         final missing = csvNames.where((n) => !contents.containsKey(n)).toList();
         if (missing.isNotEmpty) {
           _showErrorDialog('次のCSVファイルがアカウントにありません。'
               'アップロードしてから評価してください。\n${missing.join('\n')}');
-          return;
+          return null;
         }
         requestData["csv_files"] = contents;
       } catch (e) {
         _showErrorDialog('CSVファイルの読み込みに失敗しました: $e');
-        return;
+        return null;
       }
     }
 
@@ -826,12 +849,12 @@ class _GsnEditorState extends State<GsnEditor> {
       debugPrint('ブラウザ内評価: ${r.evalMs.toStringAsFixed(1)} ms');
       if (r.body['error'] != null) {
         _showErrorDialog("評価エラー: ${r.body['error']}");
-        return;
+        return null;
       }
       result = r.body;
     } catch (e) {
       _showErrorDialog("評価の準備に失敗しました。ページを再読み込みしてもう一度お試しください。\n$e");
-      return;
+      return null;
     }
 
     // ★ここが変更点: メイン変数は更新せず、一時的なリストを作成
@@ -857,16 +880,7 @@ class _GsnEditorState extends State<GsnEditor> {
         debugPrint('Away 要素の参照先を確かめられませんでした: $e');
       }
     }
-    // ★ビューアをダイアログとして開く
-    if (mounted) {
-      showDialog(
-        context: context,
-        builder: (context) => GsnResultViewer(
-          nodes: resultNodes,
-          edges: resultEdges
-        ),
-      );
-    }
+    return ModuleGraph(resultNodes, resultEdges);
 
   }
 // エラーを表示するための共通関数
@@ -4044,6 +4058,98 @@ class _NodeMarkerPainter extends CustomPainter {
   bool shouldRepaint(covariant _NodeMarkerPainter oldDelegate) => true;
 }
 
+// 評価結果の背景: 「参照先を差し込んで評価」で差し込んだ部分を破線の枠で囲み、
+// 左上に参照先のモジュール名を書いてからエッジを描く。PDF にも同じものを出す。
+class _ResultBackgroundPainter extends CustomPainter {
+  final List<GsnNode> nodes;
+  final List<GsnEdge> edges;
+  _ResultBackgroundPainter(this.nodes, this.edges);
+
+  // 評価結果の兄弟の部分木は横に 20 しか空かないので、隣の枠と重ならないよう横の余白は小さくする
+  static const _padX = 6.0;
+  static const _padY = 10.0;
+  static const _tabHeight = 18.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final frame in inlinedFrames(nodes, edges)) {
+      _paintFrame(canvas, frame.$1, frame.$2);
+    }
+    GsnEdgePainter(nodes, edges).paint(canvas, size);
+  }
+
+  void _paintFrame(Canvas canvas, Rect area, String module) {
+    final rect = Rect.fromLTRB(area.left - _padX, area.top - _padY,
+        area.right + _padX, area.bottom + _padY);
+    final color = Colors.orange.shade800;
+    canvas.drawRRect(RRect.fromRectAndRadius(rect, const Radius.circular(6)),
+        Paint()..color = Colors.orange.shade50.withValues(alpha: 0.35));
+    _drawDashedPath(
+      canvas,
+      Path()..addRRect(RRect.fromRectAndRadius(rect, const Radius.circular(6))),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+    final text = TextPainter(
+      text: TextSpan(
+        text: module,
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+      ellipsis: '…',
+    )..layout(maxWidth: max(40.0, rect.width - 8));
+    final tab = Rect.fromLTWH(
+        rect.left, rect.top - _tabHeight, text.width + 12, _tabHeight);
+    canvas.drawRRect(
+        RRect.fromRectAndCorners(tab,
+            topLeft: const Radius.circular(4), topRight: const Radius.circular(4)),
+        Paint()..color = Colors.orange.shade100);
+    canvas.drawRRect(
+        RRect.fromRectAndCorners(tab,
+            topLeft: const Radius.circular(4), topRight: const Radius.circular(4)),
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2);
+    text.paint(canvas, Offset(tab.left + 6, tab.top + (_tabHeight - text.height) / 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _ResultBackgroundPainter old) =>
+      old.nodes != nodes || old.edges != edges;
+}
+
+/// 差し込んだ部分ごとに、その一番上の要素から下にある要素を囲む矩形と、参照先のモジュール名を返す。
+/// 差し込んだ部分の中にさらに差し込んだ部分があれば、それも別の枠になる（外側の枠の内側に入る）。
+List<(Rect, String)> inlinedFrames(List<GsnNode> nodes, List<GsnEdge> edges) {
+  final byId = {for (final n in nodes) n.id: n};
+  final children = <int, List<int>>{};
+  for (final e in edges) {
+    children.putIfAbsent(e.fromId, () => []).add(e.toId);
+  }
+  final frames = <(Rect, String)>[];
+  for (final root in nodes.where((n) => n.inlinedFrom.isNotEmpty)) {
+    final seen = <int>{root.id};
+    final stack = [root.id];
+    Rect? area;
+    while (stack.isNotEmpty) {
+      final n = byId[stack.removeLast()];
+      if (n == null) continue;
+      final r = Rect.fromLTWH(n.position.dx, n.position.dy, n.width,
+          n.height + _nodeMarkersHeight(n));
+      area = area == null ? r : area.expandToInclude(r);
+      for (final c in children[n.id] ?? const <int>[]) {
+        if (seen.add(c)) stack.add(c);
+      }
+    }
+    frames.add((area!, root.inlinedFrom));
+  }
+  return frames;
+}
+
 // ★追加(GSN v3 モジュール拡張): Away 要素。参照先の要素と同じ形の下に帯を付け、
 // 帯にモジュールの印と参照先のモジュール名を書く。説明文は帯より上の部分の中央に描く。
 class AwayElementPainter extends CustomPainter {
@@ -4654,14 +4760,58 @@ extension on Offset {
 }
 
 // 評価結果を読み取り専用で表示するダイアログ。エディタの _nodes/_edges は変更しない。
-class GsnResultViewer extends StatelessWidget {
+class GsnResultViewer extends StatefulWidget {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
+  // 別の図を参照する要素があるときだけ、[nodes] が参照先を差し込んだ結果かどうかを渡す。
+  // null なら切り替えを出さない。
+  final bool? inlined;
+  // もう一方のやり方で評価し直す（失敗したときは null）。[inlined] と一緒に渡す。
+  final Future<ModuleGraph?> Function(bool inline)? onEvaluate;
 
-  const GsnResultViewer({super.key, required this.nodes, required this.edges});
+  const GsnResultViewer({
+    super.key,
+    required this.nodes,
+    required this.edges,
+    this.inlined,
+    this.onEvaluate,
+  });
+
+  @override
+  State<GsnResultViewer> createState() => _GsnResultViewerState();
+}
+
+class _GsnResultViewerState extends State<GsnResultViewer> {
+  // 一度評価した結果は取っておき、切り替えるときは評価し直さない
+  final Map<bool, ModuleGraph> _results = {};
+  late bool _inline = widget.inlined ?? false;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _results[_inline] = ModuleGraph(widget.nodes, widget.edges);
+  }
+
+  Future<void> _switchTo(bool inline) async {
+    if (inline == _inline || _busy) return;
+    if (!_results.containsKey(inline)) {
+      final evaluate = widget.onEvaluate;
+      if (evaluate == null) return;
+      setState(() => _busy = true);
+      final result = await evaluate(inline);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (result == null) return; // エラーは評価した側が表示している
+      _results[inline] = result;
+    }
+    setState(() => _inline = inline);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final nodes = _results[_inline]!.nodes;
+    final edges = _results[_inline]!.edges;
     // キャンバスのサイズ計算
     double maxX = 0;
     double maxY = 0;
@@ -4681,6 +4831,27 @@ class GsnResultViewer extends StatelessWidget {
             title: const Text("評価結果ビューア"),
             automaticallyImplyLeading: false,
             actions: [
+              if (widget.inlined != null) ...[
+                if (_busy)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: false, label: Text('確かめるだけ')),
+                    ButtonSegment(value: true, label: Text('差し込んで評価')),
+                  ],
+                  selected: {_inline},
+                  showSelectedIcon: false,
+                  onSelectionChanged: _busy ? null : (s) => _switchTo(s.first),
+                ),
+                const SizedBox(width: 8),
+              ],
               // 評価後の図もPDFに保存できるようにする（画面と同じPainterで出力する）
               IconButton(
                 icon: const Icon(Icons.picture_as_pdf),
@@ -4692,7 +4863,7 @@ class GsnResultViewer extends StatelessWidget {
                           await _exportDiagramPdf(
                             nodes: nodes,
                             edges: edges,
-                            edgePainter: GsnEdgePainter(nodes, edges),
+                            edgePainter: _ResultBackgroundPainter(nodes, edges),
                             fileName: 'gsn_evaluated.pdf',
                           );
                         } catch (e) {
@@ -4718,10 +4889,10 @@ class GsnResultViewer extends StatelessWidget {
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
-                    // エッジの描画
+                    // 差し込んだ部分の境目の枠と、エッジの描画
                     CustomPaint(
                       size: Size(canvasWidth, canvasHeight),
-                      painter: GsnEdgePainter(nodes, edges),
+                      painter: _ResultBackgroundPainter(nodes, edges),
                     ),
                     // ノードの描画
                     ...nodes.map((node) {

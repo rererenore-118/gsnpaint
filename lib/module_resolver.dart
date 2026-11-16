@@ -141,10 +141,12 @@ class ModuleResolver {
           .where((e) => ids.contains(e.fromId) && ids.contains(e.toId))
           .map((e) => GsnEdge(idMap[e.fromId]!, idMap[e.toId]!))
           .toList();
+      // 差し込んだ部分の一番上の要素に参照先のモジュール名を付ける（評価結果で境目を描く）
+      final root = idMap[target.id]!;
+      subNodes.firstWhere((n) => n.id == root).inlinedFrom = away.module;
       final sub = await _inline(subNodes, subEdges, {...visiting, away.module});
 
       // Away 要素につながっていた線は、差し込んだ要素につなぎ直す
-      final root = idMap[target.id]!;
       outNodes.remove(away);
       outNodes.addAll(sub.nodes);
       outEdges = [
