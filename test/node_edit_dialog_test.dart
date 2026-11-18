@@ -195,4 +195,29 @@ void main() {
     expect(r.module, 'HW');
     expect(r.isPublic, isFalse);
   });
+
+  testWidgets('Choice を付けて注記を入れられる', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(
+          typeName: 'Goal', initialLabel: 'G1', canBeUndeveloped: true, canChoose: true),
+    );
+    await tester.tap(find.widgetWithText(FilterChip, '選択（Choice）'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, '選択の注記（任意）'), '1 of 3');
+    await save(tester);
+    expect(results.single!.choice, '1 of 3');
+  });
+
+  testWidgets('Choice を外すと null になる', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(
+          typeName: 'Goal', initialLabel: 'G1', canChoose: true, initialChoice: ''),
+    );
+    await tester.tap(find.widgetWithText(FilterChip, '選択（Choice）'));
+    await tester.pumpAndSettle();
+    await save(tester);
+    expect(results.single!.choice, isNull);
+  });
 }

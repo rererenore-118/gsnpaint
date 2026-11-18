@@ -6,6 +6,7 @@ import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gsnpaint/main.dart';
 import 'package:gsnpaint/node_edit_dialog.dart';
+import 'package:gsnpaint/edge_edit_dialog.dart';
 
 GsnNode node(int id, GsnNodeType type, {String label = 'x', String module = ''}) =>
     GsnNode(id: id, type: type, position: Offset.zero, label: label, module: module);
@@ -68,5 +69,32 @@ void main() {
     expect(hasSupportingChild(g, all, [GsnEdge(0, 1)]), isTrue);
     expect(hasSupportingChild(g, all, [GsnEdge(0, 4)]), isTrue);
     expect(hasSupportingChild(s, all, [GsnEdge(1, 4)]), isFalse);
+  });
+
+  test('Choice と線の印は保存形式を行き来し、無いときは書かない', () {
+    final n = GsnNode(
+        id: 1, type: GsnNodeType.goal, position: Offset.zero, choice: '1 of 3');
+    expect(GsnNode.fromJson(n.toJson()).choice, '1 of 3');
+    expect(node(2, GsnNodeType.goal).toJson().containsKey('choice'), isFalse);
+
+    final e = GsnEdge(1, 2,
+        multiplicity: EdgeMultiplicity.many, cardinality: 'n');
+    final back = GsnEdge.fromJson(e.toJson());
+    expect(back.multiplicity, EdgeMultiplicity.many);
+    expect(back.cardinality, 'n');
+    expect(GsnEdge(1, 2).toJson(), {'from': 1, 'to': 2});
+    final moved = e.copyWith(fromId: 5);
+    expect([moved.fromId, moved.toId, moved.multiplicity],
+        [5, 2, EdgeMultiplicity.many]);
+  });
+
+  test('applyEdit で Choice を付け外しする', () {
+    final n = node(1, GsnNodeType.goal);
+    n.applyEdit(const NodeEditResult(
+        label: 'y', isAway: false, module: '', isPublic: false,
+        isUndeveloped: false, choice: ''));
+    expect(n.choice, '');
+    n.applyEdit(edit());
+    expect(n.choice, isNull);
   });
 }

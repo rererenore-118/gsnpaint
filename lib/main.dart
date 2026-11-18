@@ -28,6 +28,7 @@ import 'crypto_dialogs.dart';
 import 'crypto_service.dart';
 import 'browser_eval.dart';
 import 'node_edit_dialog.dart';
+import 'edge_edit_dialog.dart';
 import 'editor_shortcuts.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
@@ -183,6 +184,10 @@ class GsnNode {
   String module;
   // ★追加(GSN v3 モジュール拡張): 他の図の Away 要素から参照してよい要素に付ける「公開」の印。
   bool public;
+  // ★追加(GSN v3 構造の抽象化): Choice（選択）。null なら付けない。付けると、この要素から
+  // 下の子へ向かう線（SupportedBy）を黒い菱形でまとめ、子のうちどれか（m 個）で支えることを表す。
+  // 文字列は菱形の横に書く注記（"1 of 3" など）で、空でもよい。評価には送らない。
+  String? choice;
   // 評価結果の Away 要素に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
   AwayStatus? awayStatus;
   // 「参照先を差し込んで評価」で差し込んだ部分の一番上の要素に付ける、参照先のモジュール名。
@@ -199,6 +204,7 @@ class GsnNode {
     this.undeveloped = false,
     this.module = '',
     this.public = false,
+    this.choice,
   }) : label = label ?? _displayName(type);
 
   // 編集ダイアログの内容を反映する。「別の図を参照する」に応じて普通の要素と Away 要素を切り替える。
@@ -210,6 +216,7 @@ class GsnNode {
     module = result.module;
     public = result.isPublic;
     undeveloped = result.isUndeveloped;
+    choice = result.choice;
     awayStatus = null;
   }
 
@@ -224,6 +231,7 @@ class GsnNode {
         undeveloped: undeveloped,
         module: module,
         public: public,
+        choice: choice,
       );
 
 
@@ -242,6 +250,7 @@ class GsnNode {
       undeveloped: json['undeveloped'] == true,
       module: json['module'] ?? '',
       public: json['public'] == true,
+      choice: json['choice'] as String?,
     )..inlinedFrom = json['inlined_from'] as String? ?? '';
   }
 
@@ -256,6 +265,7 @@ class GsnNode {
         if (undeveloped) 'undeveloped': true,
         if (module.isNotEmpty) 'module': module,
         if (public) 'public': true,
+        if (choice != null) 'choice': choice,
       };
 
   // 画面に出す要素の名前。PGSN に合わせて保存形式と同じ名前（Evidence など）を使う。
@@ -414,13 +424,34 @@ bool _refersToModule(GsnNode n) =>
 class GsnEdge {
   final int fromId;
   final int toId;
-  GsnEdge(this.fromId, this.toId);
+  // ★追加(GSN v3 構造の抽象化): 線に付ける Multiplicity（黒丸）/ Optionality（白丸）の印と、
+  // 黒丸の横に書く個数（n、0..x など）。パターン用の記法で、評価には送らない。
+  EdgeMultiplicity multiplicity;
+  String cardinality;
+  GsnEdge(this.fromId, this.toId,
+      {this.multiplicity = EdgeMultiplicity.none, this.cardinality = ''});
 
   factory GsnEdge.fromJson(Map<String, dynamic> json) {
-    return GsnEdge(json['from'], json['to']);
+    return GsnEdge(
+      json['from'],
+      json['to'],
+      multiplicity: edgeMultiplicityFromJson(json['multiplicity']),
+      cardinality: json['cardinality'] as String? ?? '',
+    );
   }
 
-  Map<String, dynamic> toJson() => {'from': fromId, 'to': toId};
+  // 印を保ったまま、つなぐ要素の id だけを付け替えた写し（コピー＆ペーストや履歴に使う）
+  GsnEdge copyWith({int? fromId, int? toId}) => GsnEdge(
+      fromId ?? this.fromId, toId ?? this.toId,
+      multiplicity: multiplicity, cardinality: cardinality);
+
+  Map<String, dynamic> toJson() => {
+        'from': fromId,
+        'to': toId,
+        if (edgeMultiplicityToJson(multiplicity) != null)
+          'multiplicity': edgeMultiplicityToJson(multiplicity),
+        if (cardinality.isNotEmpty) 'cardinality': cardinality,
+      };
 }
 
 // Undo/Redo用スナップショット
@@ -449,9 +480,10 @@ class _DiagramSnapshot {
                 undeveloped: n.undeveloped,
                 module: n.module,
                 public: n.public,
+                choice: n.choice,
               ))
           .toList(),
-      edges: edges.map((e) => GsnEdge(e.fromId, e.toId)).toList(),
+      edges: edges.map((e) => e.copyWith()).toList(),
       nodeCounter: nodeCounter,
     );
   }
@@ -645,6 +677,7 @@ class _GsnEditorState extends State<GsnEditor> {
               undeveloped: n.undeveloped,
               module: n.module,
               public: n.public,
+              choice: n.choice,
             ))
         .toList();
     // 選択ノード間のエッジも保持
@@ -652,7 +685,7 @@ class _GsnEditorState extends State<GsnEditor> {
         .where((e) =>
             _selectedNodeIds.contains(e.fromId) &&
             _selectedNodeIds.contains(e.toId))
-        .map((e) => GsnEdge(e.fromId, e.toId))
+        .map((e) => e.copyWith())
         .toList();
     setState(() {});
     ScaffoldMessenger.of(context).showSnackBar(
@@ -679,10 +712,11 @@ class _GsnEditorState extends State<GsnEditor> {
         undeveloped: n.undeveloped,
         module: n.module,
         public: n.public,
+        choice: n.choice,
       ));
     }
     final newEdges = _clipboardEdges
-        .map((e) => GsnEdge(idMap[e.fromId]!, idMap[e.toId]!))
+        .map((e) => e.copyWith(fromId: idMap[e.fromId]!, toId: idMap[e.toId]!))
         .toList();
     setState(() {
       _nodes.addAll(newNodes);
@@ -1665,27 +1699,36 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
-  void _confirmDeleteEdge(GsnEdge edge) {
-    showDialog(
+  // 線をクリックしたとき: GSN v3 の Multiplicity / Optionality の印を付け外しし、削除もここから行う
+  Future<void> _editEdge(GsnEdge edge) async {
+    final from = _nodes.where((n) => n.id == edge.fromId).firstOrNull;
+    final to = _nodes.where((n) => n.id == edge.toId).firstOrNull;
+    if (from == null || to == null) return;
+    bool isGsn(GsnNode n) =>
+        _gsnElementTypes.contains(n.type) ||
+        n.type == GsnNodeType.moduleReference;
+    final result = await showDialog<EdgeEditResult>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('エッジ削除'),
-        content: const Text('この接続を削除しますか？'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('キャンセル')),
-          TextButton(
-            onPressed: () {
-              _saveToHistory();
-              setState(() => _edges.remove(edge));
-              Navigator.pop(ctx);
-              _saveToLocalStorage();
-            },
-            child: const Text('削除'),
-          ),
-        ],
+      builder: (_) => EdgeEditDialog(
+        title: '${GsnNode._displayName(from.type)} → '
+            '${GsnNode._displayName(to.type)} の線',
+        initialMultiplicity: edge.multiplicity,
+        initialCardinality: edge.cardinality,
+        canDecorate: isGsn(from) && isGsn(to),
       ),
     );
+    if (result == null || !mounted) return;
+    _saveToHistory();
+    setState(() {
+      if (result.delete) {
+        _edges.remove(edge);
+      } else {
+        edge
+          ..multiplicity = result.multiplicity
+          ..cardinality = result.cardinality;
+      }
+    });
+    _saveToLocalStorage();
   }
 
   void _importJson() {
@@ -1902,7 +1945,7 @@ class _GsnEditorState extends State<GsnEditor> {
                     // 詳細は _hitTestAnyNode() のコメントを参照。
                     for (var edge in List.from(_edges)) {
                       if (_hitTestEdge(sceneP, edge)) {
-                        _confirmDeleteEdge(edge);
+                        _editEdge(edge);
                         break;
                       }
                     }
@@ -2272,7 +2315,11 @@ class _GsnEditorState extends State<GsnEditor> {
     try {
       final fromNode = _nodes.firstWhere((n) => n.id == edge.fromId);
       final toNode = _nodes.firstWhere((n) => n.id == edge.toId);
-      final a = fromNode.position + Offset(fromNode.width / 2, fromNode.height);
+      final diamondTop = _sideAttachedTypes.contains(toNode.type)
+          ? null
+          : _choiceDiamondTop(fromNode);
+      final a = diamondTop?.translate(0, _choiceDiamondSize.height) ??
+          fromNode.position + Offset(fromNode.width / 2, fromNode.height);
       final b = toNode.position + Offset(toNode.width / 2, 0);
       return _pointLineDistance(p, a, b) < 10;
     } catch (e) {
@@ -2308,10 +2355,12 @@ class _GsnEditorState extends State<GsnEditor> {
         initialIsAway: _refersToModuleType(node.type),
         initialIsPublic: node.public,
         initialIsUndeveloped: node.undeveloped,
+        initialChoice: node.choice,
         isModuleReference: node.type == GsnNodeType.moduleReference,
         canReference: awayType != null,
         canBePublic: awayType != null,
         canBeUndeveloped: canBeUndeveloped,
+        canChoose: canBeUndeveloped,
         referenceBlockedReason: hasSupportChild
             ? 'この Goal の下に子があるので Away にできません。論証は参照先の図に書きます。'
             : null,
@@ -3440,6 +3489,8 @@ class GsnEdgePainter extends CustomPainter {
   // ----------------------------------------------------
   @override
   void paint(Canvas canvas, Size size) {
+    // Choice の菱形を経由して描いた線の親（線を描き終えてから菱形を上に重ねる）
+    final choiceParents = <GsnNode>{};
     for (final edge in edges) {
       final GsnNode fromNode;
       final GsnNode toNode;
@@ -3644,7 +3695,14 @@ Offset? _bend2;
             }
           } else {
             // スタート地点：fromNodeの真ん中下
-            startPoint = fromRect.bottomCenter;
+            // GSN v3 の Choice: 親の下の菱形から各子へ線を分ける
+            final diamondTop = _choiceDiamondTop(fromNode);
+            if (diamondTop != null) {
+              startPoint = diamondTop.translate(0, _choiceDiamondSize.height);
+              choiceParents.add(fromNode);
+            } else {
+              startPoint = fromRect.bottomCenter;
+            }
 
             // エンド地点：toNodeの真ん中上
             endPoint = toRect.topCenter;
@@ -3706,7 +3764,77 @@ Offset? _bend2;
       } else {
         canvas.drawPath(arrowPath, paint..style = PaintingStyle.fill);
       }
+
+      // GSN v3 の Multiplicity（黒丸）/ Optionality（白丸）: 矢じりのすぐ手前に丸を置く
+      if (edge.multiplicity != EdgeMultiplicity.none && distance > 0) {
+        const double r = 5;
+        final ballCenter = arrowBase - normalizedDirection * (r + 2);
+        _paintMultiplicityBall(canvas, ballCenter, r, edge.multiplicity,
+            paint.color, edge.cardinality);
+      }
     }
+
+    for (final parent in choiceParents) {
+      _paintChoice(canvas, parent);
+    }
+  }
+
+  static void _paintMultiplicityBall(Canvas canvas, Offset center, double r,
+      EdgeMultiplicity m, Color color, String label) {
+    if (m == EdgeMultiplicity.many) {
+      canvas.drawCircle(center, r, Paint()..color = color);
+    } else {
+      canvas.drawCircle(center, r, Paint()..color = Colors.white);
+      canvas.drawCircle(
+          center,
+          r,
+          Paint()
+            ..color = color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5);
+    }
+    if (label.isEmpty) return;
+    // 丸の右上に個数を書く（右下だと子の箱の下に隠れることがあるため）
+    _paintSmallLabel(canvas, label, center + Offset(r + 3, -r - 2));
+  }
+
+  // Choice: 親の下辺から菱形までの幹と、黒塗りの菱形、横の注記を描く
+  static void _paintChoice(Canvas canvas, GsnNode parent) {
+    final top = _choiceDiamondTop(parent)!;
+    final stroke = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2;
+    canvas.drawLine(
+        Offset(top.dx, parent.position.dy + parent.height), top, stroke);
+    final w = _choiceDiamondSize.width / 2;
+    final h = _choiceDiamondSize.height;
+    final path = Path()
+      ..moveTo(top.dx, top.dy)
+      ..lineTo(top.dx + w, top.dy + h / 2)
+      ..lineTo(top.dx, top.dy + h)
+      ..lineTo(top.dx - w, top.dy + h / 2)
+      ..close();
+    canvas.drawPath(path, Paint()..color = Colors.black);
+    final label = parent.choice ?? '';
+    if (label.isNotEmpty) {
+      _paintSmallLabel(canvas, label, top.translate(w + 6, h / 2));
+    }
+  }
+
+  // 線の印に添える小さな注記。anchor は文字の左端（縦方向は中央）
+  static void _paintSmallLabel(Canvas canvas, String text, Offset anchor) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(
+            fontSize: 11, color: Colors.black, fontStyle: FontStyle.italic),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final topLeft = Offset(anchor.dx, anchor.dy - tp.height / 2);
+    canvas.drawRect((topLeft & tp.size).inflate(1),
+        Paint()..color = Colors.white.withOpacity(0.85));
+    tp.paint(canvas, topLeft);
   }
 
   @override
@@ -3978,6 +4106,18 @@ void _absorbUndevelopedNodes(List<GsnNode> nodes, List<GsnEdge> edges) {
   }
   nodes.removeWhere((n) => absorbed.contains(n.id));
   edges.removeWhere((e) => absorbed.contains(e.fromId) || absorbed.contains(e.toId));
+}
+
+// ★追加(GSN v3 構造の抽象化): Choice の黒い菱形。親の下辺の印（三角・菱形）のさらに下に置き、
+// 親の下辺からここまでを幹、菱形の下の頂点から各子へ線を分ける。
+const Size _choiceDiamondSize = Size(14, 18);
+const double _choiceTrunkLength = 16;
+
+// Choice を付けた要素の、菱形の上の頂点。Choice が無ければ null。
+Offset? _choiceDiamondTop(GsnNode n) {
+  if (n.choice == null) return null;
+  return Offset(n.position.dx + n.width / 2,
+      n.position.dy + n.height + _nodeMarkersHeight(n) + _choiceTrunkLength);
 }
 
 // ノード下辺から下に描く印の高さの合計（PDFの外接矩形の計算に使う）

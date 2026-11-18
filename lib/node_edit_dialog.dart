@@ -11,12 +11,16 @@ class NodeEditResult {
   final bool isPublic;
   final bool isUndeveloped;
 
+  /// GSN v3 の Choice（子へ向かう線を菱形でまとめる）。null なら付けない。文字列は注記。
+  final String? choice;
+
   const NodeEditResult({
     required this.label,
     required this.isAway,
     required this.module,
     required this.isPublic,
     required this.isUndeveloped,
+    this.choice,
   });
 }
 
@@ -28,6 +32,7 @@ class NodeEditDialog extends StatefulWidget {
   final bool initialIsAway;
   final bool initialIsPublic;
   final bool initialIsUndeveloped;
+  final String? initialChoice;
 
   /// 「別の図を参照する」を出すか。参照先になれる種類の要素だけ true。
   final bool canReference;
@@ -37,6 +42,9 @@ class NodeEditDialog extends StatefulWidget {
   final bool isModuleReference;
   final bool canBePublic;
   final bool canBeUndeveloped;
+
+  /// 「選択（Choice）」を出すか。下の子へ線を伸ばす Goal / Strategy だけ true。
+  final bool canChoose;
 
   /// 普通の要素から Away にできない理由。null なら切り替えられる。
   final String? referenceBlockedReason;
@@ -56,10 +64,12 @@ class NodeEditDialog extends StatefulWidget {
     this.initialIsAway = false,
     this.initialIsPublic = false,
     this.initialIsUndeveloped = false,
+    this.initialChoice,
     this.canReference = false,
     this.isModuleReference = false,
     this.canBePublic = false,
     this.canBeUndeveloped = false,
+    this.canChoose = false,
     this.referenceBlockedReason,
     this.undevelopedHint,
     this.pickModule,
@@ -78,11 +88,15 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
   late bool _isAway = widget.initialIsAway || widget.isModuleReference;
   late bool _isPublic = widget.initialIsPublic;
   late bool _isUndeveloped = widget.initialIsUndeveloped;
+  late bool _hasChoice = widget.initialChoice != null;
+  late final TextEditingController _choiceCtl =
+      TextEditingController(text: widget.initialChoice ?? '');
 
   @override
   void dispose() {
     _labelCtl.dispose();
     _moduleCtl.dispose();
+    _choiceCtl.dispose();
     super.dispose();
   }
 
@@ -99,6 +113,9 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
         module: _isAway ? _moduleCtl.text.trim() : '',
         isPublic: !_isAway && widget.canBePublic && _isPublic,
         isUndeveloped: !_isAway && widget.canBeUndeveloped && _isUndeveloped,
+        choice: !_isAway && widget.canChoose && _hasChoice
+            ? _choiceCtl.text.trim()
+            : null,
       ),
     );
   }
@@ -147,6 +164,13 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
           selected: _isUndeveloped,
           onSelected: (v) => setState(() => _isUndeveloped = v),
         ),
+      if (!_isAway && widget.canChoose)
+        FilterChip(
+          label: const Text('選択（Choice）'),
+          tooltip: '下の子のうちどれか（m 個）で支える。子へ向かう線を黒い菱形でまとめる',
+          selected: _hasChoice,
+          onSelected: (v) => setState(() => _hasChoice = v),
+        ),
     ];
     return AlertDialog(
       // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
@@ -192,6 +216,15 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
+            ),
+          if (!_isAway && widget.canChoose && _hasChoice)
+            TextField(
+              controller: _choiceCtl,
+              decoration: const InputDecoration(
+                labelText: '選択の注記（任意）',
+                hintText: '例: 1 of 3、m of n',
+              ),
+              onSubmitted: (_) => _submit(),
             ),
           if (_isAway)
             TextField(
