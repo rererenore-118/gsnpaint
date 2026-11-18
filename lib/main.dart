@@ -29,10 +29,12 @@ import 'crypto_service.dart';
 import 'browser_eval.dart';
 import 'node_edit_dialog.dart';
 import 'edge_edit_dialog.dart';
+import 'diagram_settings_dialog.dart';
 import 'editor_shortcuts.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
+part 'module_interface.dart';
 part 'module_resolver.dart';
 
 void main() async {
@@ -75,6 +77,10 @@ enum GsnNodeType {
   awayAssumption, // 別のモジュールの Assumption を参照する要素
   awayJustification, // 別のモジュールの Justification を参照する要素
   moduleReference, // ★追加(GSN v3 1:4.2): 参照先のモジュールの論証全体を指す要素
+  contractReference, // ★追加(GSN v3 1:4.2): 契約モジュール全体を指す要素
+  instantiationData, // ★追加(GSN v3 1:3.5): テンプレートの具体化データへの参照（GSN の要素ではない）
+  archModule, // ★追加(GSN v3 1:4.4): アーキテクチャ図のモジュール
+  archContract, // ★追加(GSN v3 1:4.4): アーキテクチャ図の契約モジュール
   recordAccess,
   lambda,
   application,
@@ -188,6 +194,15 @@ class GsnNode {
   // 下の子へ向かう線（SupportedBy）を黒い菱形でまとめ、子のうちどれか（m 個）で支えることを表す。
   // 文字列は菱形の横に書く注記（"1 of 3" など）で、空でもよい。評価には送らない。
   String? choice;
+  // ★追加(GSN v3 2:8.1.6): Choice の菱形の手前（幹）に付ける Multiplicity / Optionality。
+  // 選んだ子の全体に対する個数を表す。Choice が無ければ使わない。
+  EdgeMultiplicity choiceMultiplicity;
+  String choiceCardinality;
+  // ★追加(GSN v3 1:5 確信の論証): 要素に付ける ACP（Assurance Claim Point）の識別子。空なら付けない。
+  // 成果物を参照する要素（Evidence / Context とその Away 版）に、下辺の黒い四角として描く。
+  String acp;
+  // ★追加(GSN v3 1:4.2): 「契約で支える予定」の印。Goal だけに付き、未展開とは両立しない。
+  bool contractPending;
   // 評価結果の Away 要素に付ける、参照先が見つかったかどうか。保存はしない（評価のたびに確かめる）。
   AwayStatus? awayStatus;
   // 「参照先を差し込んで評価」で差し込んだ部分の一番上の要素に付ける、参照先のモジュール名。
@@ -205,7 +220,29 @@ class GsnNode {
     this.module = '',
     this.public = false,
     this.choice,
+    this.choiceMultiplicity = EdgeMultiplicity.none,
+    this.choiceCardinality = '',
+    this.acp = '',
+    this.contractPending = false,
   }) : label = label ?? _displayName(type);
+
+  // 中身を写した新しいノード（コピー＆ペースト、操作履歴、モジュールの差し込みに使う）
+  GsnNode copy({int? id, Offset? position}) => GsnNode(
+        id: id ?? this.id,
+        type: type,
+        position: position ?? this.position,
+        width: width,
+        height: height,
+        label: label,
+        undeveloped: undeveloped,
+        module: module,
+        public: public,
+        choice: choice,
+        choiceMultiplicity: choiceMultiplicity,
+        choiceCardinality: choiceCardinality,
+        acp: acp,
+        contractPending: contractPending,
+      );
 
   // 編集ダイアログの内容を反映する。「別の図を参照する」に応じて普通の要素と Away 要素を切り替える。
   void applyEdit(NodeEditResult result) {
@@ -217,22 +254,15 @@ class GsnNode {
     public = result.isPublic;
     undeveloped = result.isUndeveloped;
     choice = result.choice;
+    choiceMultiplicity = result.choiceMultiplicity;
+    choiceCardinality = result.choiceCardinality;
+    acp = result.acp;
+    contractPending = result.contractPending;
     awayStatus = null;
   }
 
   // id だけを付け替えた写し（モジュールの部分木を差し込むときに使う）
-  GsnNode copyWithId(int newId) => GsnNode(
-        id: newId,
-        type: type,
-        position: position,
-        width: width,
-        height: height,
-        label: label,
-        undeveloped: undeveloped,
-        module: module,
-        public: public,
-        choice: choice,
-      );
+  GsnNode copyWithId(int newId) => copy(id: newId);
 
 
 
@@ -251,6 +281,10 @@ class GsnNode {
       module: json['module'] ?? '',
       public: json['public'] == true,
       choice: json['choice'] as String?,
+      choiceMultiplicity: edgeMultiplicityFromJson(json['choice_multiplicity']),
+      choiceCardinality: json['choice_cardinality'] as String? ?? '',
+      acp: json['acp'] as String? ?? '',
+      contractPending: json['contract_pending'] == true,
     )..inlinedFrom = json['inlined_from'] as String? ?? '';
   }
 
@@ -266,12 +300,24 @@ class GsnNode {
         if (module.isNotEmpty) 'module': module,
         if (public) 'public': true,
         if (choice != null) 'choice': choice,
+        if (choice != null && choiceMultiplicity != EdgeMultiplicity.none)
+          'choice_multiplicity': edgeMultiplicityToJson(choiceMultiplicity),
+        if (choice != null && choiceCardinality.isNotEmpty)
+          'choice_cardinality': choiceCardinality,
+        if (acp.isNotEmpty) 'acp': acp,
+        if (contractPending) 'contract_pending': true,
       };
 
   // 画面に出す要素の名前。PGSN に合わせて保存形式と同じ名前（Evidence など）を使う。
   // （GSN の規格では Evidence にあたる要素を Solution と呼ぶが、画面も Evidence にそろえる）
-  static String _displayName(GsnNodeType t) =>
-      t == GsnNodeType.moduleReference ? 'Module Reference' : _gsnTypeName(t);
+  static String _displayName(GsnNodeType t) => switch (t) {
+        GsnNodeType.moduleReference => 'Module Reference',
+        GsnNodeType.contractReference => 'Contract Reference',
+        GsnNodeType.instantiationData => 'Instantiation Data',
+        GsnNodeType.archModule => 'Module',
+        GsnNodeType.archContract => 'Contract',
+        _ => _gsnTypeName(t),
+      };
 
   // 評価用Python（build_gsn.py）が期待する文字列と完全一致させる必要がある。
   static String _gsnTypeName(GsnNodeType t) {
@@ -304,6 +350,14 @@ class GsnNode {
         return 'AwayJustification';
       case GsnNodeType.moduleReference:
         return 'ModuleReference';
+      case GsnNodeType.contractReference:
+        return 'ContractReference';
+      case GsnNodeType.instantiationData:
+        return 'InstantiationData';
+      case GsnNodeType.archModule:
+        return 'ArchModule';
+      case GsnNodeType.archContract:
+        return 'ArchContract';
       case GsnNodeType.record:
         return 'Record';
       case GsnNodeType.recordAccess:
@@ -347,6 +401,25 @@ const Set<GsnNodeType> _leafTypes = {
   GsnNodeType.undeveloped,
   // 論証は参照先のモジュールにあるので、参照元の図では下に何も付けない
   GsnNodeType.moduleReference,
+  GsnNodeType.contractReference,
+};
+
+// ★追加: 論証の一部ではない記号。評価には送らない。
+// Instantiation Data Reference（1:3.5）は GSN の要素ではなく、アーキテクチャ図の記号（1:4.4）は
+// 論証の中身ではなくモジュールどうしの関係を表す。
+const Set<GsnNodeType> _architectureTypes = {
+  GsnNodeType.archModule,
+  GsnNodeType.archContract,
+};
+const Set<GsnNodeType> _nonArgumentTypes = {
+  GsnNodeType.instantiationData,
+  ..._architectureTypes,
+};
+
+// 別の図（モジュール）を指す参照要素（論証全体を指すもの）
+const Set<GsnNodeType> _wholeModuleReferenceTypes = {
+  GsnNodeType.moduleReference,
+  GsnNodeType.contractReference,
 };
 
 // Defeater だけを子に取れる要素。中身の論証を持たない（Away Solution は参照先にある）。
@@ -364,6 +437,7 @@ const Set<GsnNodeType> _strategyChildTypes = {
   GsnNodeType.evidence,
   GsnNodeType.awaySolution,
   GsnNodeType.moduleReference,
+  GsnNodeType.contractReference,
   GsnNodeType.undeveloped,
   GsnNodeType.application,
   GsnNodeType.map,
@@ -376,11 +450,39 @@ const Set<GsnNodeType> _strategyChildTypes = {
 /// 評価で使われない線（黙って捨てられる線）と、評価が止まらなくなる輪を作らせない。
 /// λ 系（Lambda・Application・Map・Record など）の下は、評価側の構造に任せて調べない。
 String? connectionBlockedReason(
-    GsnNode parent, GsnNode child, Iterable<GsnEdge> edges) {
+    GsnNode parent, GsnNode child, Iterable<GsnEdge> edges,
+    {bool contractModule = false}) {
   String name(GsnNodeType t) => GsnNode._displayName(t);
   if (parent.id == child.id) return '自分自身にはつなげません。';
   if (edges.any((e) => e.fromId == parent.id && e.toId == child.id)) {
     return 'この 2 つはすでにつながっています。';
+  }
+  // アーキテクチャ図の記号はモジュールどうしの関係だけを表し、論証の要素とはつながない
+  final parentArch = _architectureTypes.contains(parent.type);
+  final childArch = _architectureTypes.contains(child.type);
+  if (parentArch != childArch) {
+    return 'アーキテクチャ図の Module / Contract は、Module / Contract どうしでだけつなげます。';
+  }
+  if (parentArch) {
+    // モジュールどうしは双方向に支え合ってよい（1:4.5.2）ので、輪の検査はしない
+    if (edges.any((e) => e.fromId == child.id && e.toId == parent.id)) {
+      return 'この 2 つはすでにつながっています。両端の矢じりは線をクリックして変えられます。';
+    }
+    return null;
+  }
+  // Instantiation Data Reference は、テンプレートの一番上の要素へ点線を 1 本引くだけ
+  if (child.type == GsnNodeType.instantiationData) {
+    return 'Instantiation Data からテンプレートの一番上の要素へ線を引いてください。';
+  }
+  if (parent.type == GsnNodeType.instantiationData) {
+    if (!_gsnElementTypes.contains(child.type) &&
+        !_wholeModuleReferenceTypes.contains(child.type)) {
+      return 'Instantiation Data は GSN の要素にだけつなげます。';
+    }
+    if (edges.any((e) => e.fromId == parent.id)) {
+      return 'Instantiation Data がつなげるのは、テンプレートの一番上の要素 1 つだけです。';
+    }
+    return null;
   }
   // child から下へたどって parent に着くなら、つなぐと輪になる
   final seen = <int>{};
@@ -395,8 +497,18 @@ String? connectionBlockedReason(
       if (e.fromId == id) stack.add(e.toId);
     }
   }
+  // 契約モジュール（1:4.7）では、Away Goal を Goal / Strategy / Away Goal で支えてよい（1:4.2 表 1:4-2）
+  if (contractModule &&
+      parent.type == GsnNodeType.awayGoal &&
+      const {GsnNodeType.goal, GsnNodeType.strategy, GsnNodeType.awayGoal}
+          .contains(child.type)) {
+    return null;
+  }
   if (wouldDecomposeAwayGoal(parent, child)) {
-    return 'Away Goal の下に支える子は付けられません。論証は参照先の図に書きます。';
+    return contractModule
+        ? '契約モジュールでも、Away Goal を支えられるのは Goal / Strategy / Away Goal だけです。'
+        : 'Away Goal の下に支える子は付けられません。論証は参照先の図に書きます。'
+            '（契約モジュールでは付けられます。ファイル ▸ 図の設定）';
   }
   if (_leafTypes.contains(parent.type)) {
     return '${name(parent.type)} の下には何も付けられません。';
@@ -414,7 +526,7 @@ String? connectionBlockedReason(
 
 // 別の図（モジュール）を参照する要素か。Away 要素と Module Reference。
 bool _refersToModuleType(GsnNodeType t) =>
-    _awayTargetTypes.containsKey(t) || t == GsnNodeType.moduleReference;
+    _awayTargetTypes.containsKey(t) || _wholeModuleReferenceTypes.contains(t);
 
 // 参照先のモジュール名が入っていて、評価の前に読み込む必要がある要素か。
 bool _refersToModule(GsnNode n) =>
@@ -428,8 +540,23 @@ class GsnEdge {
   // 黒丸の横に書く個数（n、0..x など）。パターン用の記法で、評価には送らない。
   EdgeMultiplicity multiplicity;
   String cardinality;
+  // ★追加(GSN v3 1:5): 関係に付ける ACP の識別子。空なら付けない。線の途中に黒い四角で描く。
+  String acp;
+  // ★追加(GSN v3 1:4.4 アーキテクチャ図): モジュールどうしの線の両端の矢じり（終点側と始点側）と、
+  // 線がつながるモジュールインタフェースの名前（モジュールの縁の小さな四角に添える）。
+  // アーキテクチャ図の記号（Module / Contract）どうしの線でだけ使う。
+  ModuleLinkEnd archHead;
+  ModuleLinkEnd archTail;
+  String fromInterface;
+  String toInterface;
   GsnEdge(this.fromId, this.toId,
-      {this.multiplicity = EdgeMultiplicity.none, this.cardinality = ''});
+      {this.multiplicity = EdgeMultiplicity.none,
+      this.cardinality = '',
+      this.acp = '',
+      this.archHead = ModuleLinkEnd.supported,
+      this.archTail = ModuleLinkEnd.none,
+      this.fromInterface = '',
+      this.toInterface = ''});
 
   factory GsnEdge.fromJson(Map<String, dynamic> json) {
     return GsnEdge(
@@ -437,13 +564,24 @@ class GsnEdge {
       json['to'],
       multiplicity: edgeMultiplicityFromJson(json['multiplicity']),
       cardinality: json['cardinality'] as String? ?? '',
+      acp: json['acp'] as String? ?? '',
+      archHead: moduleLinkEndFromJson(json['arch_head'], ModuleLinkEnd.supported),
+      archTail: moduleLinkEndFromJson(json['arch_tail'], ModuleLinkEnd.none),
+      fromInterface: json['from_interface'] as String? ?? '',
+      toInterface: json['to_interface'] as String? ?? '',
     );
   }
 
   // 印を保ったまま、つなぐ要素の id だけを付け替えた写し（コピー＆ペーストや履歴に使う）
   GsnEdge copyWith({int? fromId, int? toId}) => GsnEdge(
       fromId ?? this.fromId, toId ?? this.toId,
-      multiplicity: multiplicity, cardinality: cardinality);
+      multiplicity: multiplicity,
+      cardinality: cardinality,
+      acp: acp,
+      archHead: archHead,
+      archTail: archTail,
+      fromInterface: fromInterface,
+      toInterface: toInterface);
 
   Map<String, dynamic> toJson() => {
         'from': fromId,
@@ -451,6 +589,11 @@ class GsnEdge {
         if (edgeMultiplicityToJson(multiplicity) != null)
           'multiplicity': edgeMultiplicityToJson(multiplicity),
         if (cardinality.isNotEmpty) 'cardinality': cardinality,
+        if (acp.isNotEmpty) 'acp': acp,
+        if (archHead != ModuleLinkEnd.supported) 'arch_head': archHead.name,
+        if (archTail != ModuleLinkEnd.none) 'arch_tail': archTail.name,
+        if (fromInterface.isNotEmpty) 'from_interface': fromInterface,
+        if (toInterface.isNotEmpty) 'to_interface': toInterface,
       };
 }
 
@@ -470,18 +613,7 @@ class _DiagramSnapshot {
       List<GsnNode> nodes, List<GsnEdge> edges, int nodeCounter) {
     return _DiagramSnapshot(
       nodes: nodes
-          .map((n) => GsnNode(
-                id: n.id,
-                type: n.type,
-                position: n.position,
-                width: n.width,
-                height: n.height,
-                label: n.label,
-                undeveloped: n.undeveloped,
-                module: n.module,
-                public: n.public,
-                choice: n.choice,
-              ))
+          .map((n) => n.copy())
           .toList(),
       edges: edges.map((e) => e.copyWith()).toList(),
       nodeCounter: nodeCounter,
@@ -502,6 +634,8 @@ class _GsnEditorState extends State<GsnEditor> {
 
   final List<GsnNode> _nodes = [];
   final List<GsnEdge> _edges = [];
+  // 図そのものの設定（契約モジュールか、モジュールの説明、パターン定義）
+  DiagramInfo _diagramInfo = DiagramInfo();
   int _nodeCounter = 0; // 採番用カウンタ。削除しても減らさないため一意性が保たれる。
   bool _deleteMode = false;
   // エッジ接続の途中状態: 1回目クリックで選択したノードID。nullなら未選択。
@@ -550,6 +684,12 @@ class _GsnEditorState extends State<GsnEditor> {
   // （両者がずれると「見えている場所を押しても反応しない」という状態になるため）。
   static const double _collapseBadgeInset = 2.0; // ノード左上からのオフセット
   static const double _collapseBadgeSize = 22.0; // 描画される円の直径
+
+  // 折りたたみのバッジを出すか。下に子がある要素だけ。テンプレートの記号と
+  // アーキテクチャ図の記号は子を持つ論証ではない（線は関係を表すだけ）ので出さない。
+  bool _canCollapse(GsnNode node) =>
+      !_nonArgumentTypes.contains(node.type) &&
+      _edges.any((e) => e.fromId == node.id);
   // 当たり判定はノードの角(0,0)から、バッジの右下端 + 余白まで。押しやすさのため実際の円より広めに取る。
   static const double _collapseBadgeHitArea =
       _collapseBadgeInset + _collapseBadgeSize + 6.0;
@@ -667,18 +807,7 @@ class _GsnEditorState extends State<GsnEditor> {
     if (_selectedNodeIds.isEmpty) return;
     final selected = _nodes.where((n) => _selectedNodeIds.contains(n.id)).toList();
     _clipboard = selected
-        .map((n) => GsnNode(
-              id: n.id,
-              type: n.type,
-              position: n.position,
-              width: n.width,
-              height: n.height,
-              label: n.label,
-              undeveloped: n.undeveloped,
-              module: n.module,
-              public: n.public,
-              choice: n.choice,
-            ))
+        .map((n) => n.copy())
         .toList();
     // 選択ノード間のエッジも保持
     _clipboardEdges = _edges
@@ -702,18 +831,7 @@ class _GsnEditorState extends State<GsnEditor> {
     for (final n in _clipboard) {
       final newId = _nodeCounter++;
       idMap[n.id] = newId;
-      newNodes.add(GsnNode(
-        id: newId,
-        type: n.type,
-        position: n.position + const Offset(40, 40),
-        width: n.width,
-        height: n.height,
-        label: n.label,
-        undeveloped: n.undeveloped,
-        module: n.module,
-        public: n.public,
-        choice: n.choice,
-      ));
+      newNodes.add(n.copy(id: newId, position: n.position + const Offset(40, 40)));
     }
     final newEdges = _clipboardEdges
         .map((e) => e.copyWith(fromId: idMap[e.fromId]!, toId: idMap[e.toId]!))
@@ -750,7 +868,9 @@ class _GsnEditorState extends State<GsnEditor> {
   @override
   void initState() {
     super.initState();
-    _clearLocalStorage();
+    // 前回の編集内容（自動保存）は、すぐにブラウザから消したうえで「復元」を選べるようにする。
+    // 共有のパソコンで別の人に見られないよう、黙って開くことはしない。
+    _offerRestore();
     // 評価用の Python を裏で読み込んでおく（Web Worker で動くので画面は固まらない）
     BrowserEval.preload();
     // ログイン状態は Firebase がブラウザに保持しており、再読み込み後も自動で復元されて通知が来る。
@@ -813,8 +933,23 @@ class _GsnEditorState extends State<GsnEditor> {
     if (usesModules && _cloudBlockedReason == null && await _ensureUnlocked()) {
       resolver = ModuleResolver.cloud(_cloudService);
     }
-    var evalNodes = _nodes;
-    var evalEdges = _edges;
+    // テンプレートの記号とアーキテクチャ図の記号は論証の一部ではないので評価に送らない
+    final skip = {
+      for (final n in _nodes)
+        if (_nonArgumentTypes.contains(n.type)) n.id
+    };
+    var evalNodes = [
+      for (final n in _nodes)
+        if (!skip.contains(n.id)) n
+    ];
+    var evalEdges = [
+      for (final e in _edges)
+        if (!skip.contains(e.fromId) && !skip.contains(e.toId)) e
+    ];
+    if (evalNodes.isEmpty) {
+      _showErrorDialog('評価できる論証の要素がありません。');
+      return null;
+    }
     if (usesModules && inline) {
       if (resolver == null) {
         _showErrorDialog('Away 要素に参照先を差し込んで評価するには、ログインして暗号化を解除してください。\n'
@@ -822,7 +957,7 @@ class _GsnEditorState extends State<GsnEditor> {
         return null;
       }
       try {
-        final merged = await resolver.inlineAll(_nodes, _edges);
+        final merged = await resolver.inlineAll(evalNodes, evalEdges);
         evalNodes = merged.nodes;
         evalEdges = merged.edges;
       } catch (e) {
@@ -936,14 +1071,17 @@ class _GsnEditorState extends State<GsnEditor> {
     );
   }
 
+  // 保存する図の中身（ローカルの JSON 保存・アカウント・自動保存で共通）
+  Map<String, Object> _diagramData() => {
+        'nodes': _nodes.map((n) => n.toJson()).toList(),
+        'edges': _edges.map((e) => e.toJson()).toList(),
+        'nodeCounter': _nodeCounter,
+        if (_diagramInfo.toJson() != null) 'diagram': _diagramInfo.toJson()!,
+      };
+
   Future<void> _saveToLocalStorage() async {
     final prefs = await SharedPreferences.getInstance();
-    final data = {
-      'nodes': _nodes.map((n) => n.toJson()).toList(),
-      'edges': _edges.map((e) => e.toJson()).toList(),
-      'nodeCounter': _nodeCounter,
-    };
-    final jsonString = jsonEncode(data);
+    final jsonString = jsonEncode(_diagramData());
     await prefs.setString('gsn_editor_data', jsonString);
   }
 
@@ -971,6 +1109,7 @@ class _GsnEditorState extends State<GsnEditor> {
       setState(() {
         _nodes.clear();
         _edges.clear();
+        _diagramInfo = DiagramInfo();
         _nodeCounter = 0;
         _connecting = null;
         _deleteMode = false;
@@ -983,11 +1122,41 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
-  Future<void> _loadFromLocalStorage() async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonString = prefs.getString('gsn_editor_data');
-    if (jsonString == null) return;
+  // 起動したとき、前回の自動保存が残っていれば「復元」ボタン付きの通知を出す
+  Future<void> _offerRestore() async {
+    String? saved;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      saved = prefs.getString('gsn_editor_data');
+    } catch (_) {}
+    await _clearLocalStorage();
+    if (saved == null || !mounted) return;
+    final int count;
+    try {
+      count = (jsonDecode(saved)['nodes'] as List).length;
+    } catch (_) {
+      return;
+    }
+    if (count == 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 15),
+        content: Text('前回の編集内容（要素 $count 個）が残っています。'),
+        action: SnackBarAction(
+          label: '復元',
+          onPressed: () {
+            // 復元したあとに何か描いていたら、元に戻すで戻れるようにする
+            if (_nodes.isNotEmpty) _saveToHistory();
+            _restoreDiagram(saved!);
+            _saveToLocalStorage();
+          },
+        ),
+      ));
+    });
+  }
 
+  void _restoreDiagram(String jsonString) {
     try {
       final data = jsonDecode(jsonString);
       setState(() {
@@ -998,10 +1167,12 @@ class _GsnEditorState extends State<GsnEditor> {
         _edges.addAll(
             (data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
         _absorbUndevelopedNodes(_nodes, _edges);
-        _nodeCounter = data['nodeCounter'] ?? 0;
+        _nodeCounter = data['nodeCounter'] ??
+            (_nodes.isEmpty ? 0 : _nodes.map((n) => n.id).reduce(max) + 1);
+        _diagramInfo = DiagramInfo.fromJson(data['diagram']);
       });
     } catch (e) {
-      print("データの読み込みに失敗しました: $e");
+      debugPrint("データの読み込みに失敗しました: $e");
     }
   }
 
@@ -1324,16 +1495,36 @@ class _GsnEditorState extends State<GsnEditor> {
     _saveToLocalStorage();
   }
 
+  // 新しく置く要素の大きさ
+  static Size _initialSize(GsnNodeType type) => switch (type) {
+        // モジュール名と説明を両方書くので少し大きめにする
+        GsnNodeType.moduleReference ||
+        GsnNodeType.contractReference ||
+        GsnNodeType.archModule ||
+        GsnNodeType.archContract =>
+          const Size(160, 80),
+        GsnNodeType.instantiationData => const Size(150, 70),
+        _ => const Size(100, 60),
+      };
+
   void _addNode(GsnNodeType type, Offset position) {
+    // 契約モジュールは他のモジュールの論証全体を参照しない（1:4.2 表 1:4-1）
+    if (_diagramInfo.isContract && _wholeModuleReferenceTypes.contains(type)) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+            content: Text('契約モジュールには ${GsnNode._displayName(type)} を置けません。')));
+      return;
+    }
+    final size = _initialSize(type);
     _saveToHistory();
     setState(() {
       _nodes.add(GsnNode(
         id: _nodeCounter++,
         type: type,
         position: _snapToGrid(position),
-        // Module Reference はモジュール名と説明を両方書くので少し大きめにする
-        width: type == GsnNodeType.moduleReference ? 160 : 100,
-        height: type == GsnNodeType.moduleReference ? 70 : 60,
+        width: size.width,
+        height: size.height,
         label: (type == GsnNodeType.record ||
                               type == GsnNodeType.x ||
                               type == GsnNodeType.undeveloped)
@@ -1390,6 +1581,11 @@ class _GsnEditorState extends State<GsnEditor> {
         _menuItem(Icons.folder_open, 'JSON 読み込み', _importJson),
         _menuItem(Icons.save_alt, 'JSON 保存', _exportJson),
         _menuItem(Icons.picture_as_pdf, 'PDF 保存', _nodes.isEmpty ? null : _exportPdf),
+        const PopupMenuDivider(),
+        _menuHeader('図'),
+        _menuItem(Icons.tune, _diagramInfo.isContract ? '図の設定（契約モジュール）' : '図の設定',
+            _editDiagramSettings),
+        _menuItem(Icons.view_list, 'モジュールインタフェース', _showModuleInterface),
         const PopupMenuDivider(),
         _menuHeader('CSV'),
         _menuItem(Icons.upload_file, 'アップロード', _uploadCsv),
@@ -1546,7 +1742,8 @@ class _GsnEditorState extends State<GsnEditor> {
       } else if (_connecting != node.id) {
         final parent = _nodes.firstWhere((n) => n.id == _connecting);
         // つなぎ方のルールに合わない線は引かせない（評価で黙って捨てられるため）
-        final blocked = connectionBlockedReason(parent, node, _edges);
+        final blocked = connectionBlockedReason(parent, node, _edges,
+            contractModule: _diagramInfo.isContract);
         if (blocked != null) {
           _cancelConnecting();
           ScaffoldMessenger.of(context)
@@ -1706,15 +1903,30 @@ class _GsnEditorState extends State<GsnEditor> {
     if (from == null || to == null) return;
     bool isGsn(GsnNode n) =>
         _gsnElementTypes.contains(n.type) ||
-        n.type == GsnNodeType.moduleReference;
+        _wholeModuleReferenceTypes.contains(n.type);
+    final kind = _architectureTypes.contains(from.type)
+        ? EdgeEditKind.architecture
+        : isGsn(from) && isGsn(to)
+            ? EdgeEditKind.gsn
+            : EdgeEditKind.other;
+    String nameOf(GsnNode n) => _architectureTypes.contains(n.type) &&
+            n.module.isNotEmpty
+        ? n.module
+        : GsnNode._displayName(n.type);
     final result = await showDialog<EdgeEditResult>(
       context: context,
       builder: (_) => EdgeEditDialog(
-        title: '${GsnNode._displayName(from.type)} → '
-            '${GsnNode._displayName(to.type)} の線',
+        title: '${nameOf(from)} → ${nameOf(to)} の線',
+        kind: kind,
         initialMultiplicity: edge.multiplicity,
         initialCardinality: edge.cardinality,
-        canDecorate: isGsn(from) && isGsn(to),
+        initialAcp: edge.acp,
+        initialArchHead: edge.archHead,
+        initialArchTail: edge.archTail,
+        initialFromInterface: edge.fromInterface,
+        initialToInterface: edge.toInterface,
+        fromName: nameOf(from),
+        toName: nameOf(to),
       ),
     );
     if (result == null || !mounted) return;
@@ -1725,7 +1937,12 @@ class _GsnEditorState extends State<GsnEditor> {
       } else {
         edge
           ..multiplicity = result.multiplicity
-          ..cardinality = result.cardinality;
+          ..cardinality = result.cardinality
+          ..acp = result.acp
+          ..archHead = result.archHead
+          ..archTail = result.archTail
+          ..fromInterface = result.fromInterface
+          ..toInterface = result.toInterface;
       }
     });
     _saveToLocalStorage();
@@ -1765,6 +1982,7 @@ class _GsnEditorState extends State<GsnEditor> {
             _edges.clear();
             _nodes.addAll(newNodes);
             _edges.addAll(newEdges);
+            _diagramInfo = DiagramInfo.fromJson(data['diagram']);
             _openCloudName = null;
 
             // ノードカウンターの更新
@@ -2086,8 +2304,7 @@ class _GsnEditorState extends State<GsnEditor> {
                                   _lastTapDownLocalPos = details.localPosition,
                               onTap: () {
                                 final pos = _lastTapDownLocalPos;
-                                final hasChildren =
-                                    _edges.any((e) => e.fromId == node.id);
+                                final hasChildren = _canCollapse(node);
                                 if (pos != null &&
                                     hasChildren &&
                                     pos.dx >= 0 &&
@@ -2188,7 +2405,7 @@ class _GsnEditorState extends State<GsnEditor> {
                                   // （タップ判定はノード本体のGestureDetector側のonTapで座標判定している。
                                   // 理由は上のonTapDown/onTap側のコメントを参照）。
                                   // 位置とサイズは_collapseBadge*定数で判定領域と揃える。
-                                  if (_edges.any((e) => e.fromId == node.id))
+                                  if (_canCollapse(node))
                                     Positioned(
                                       left: _collapseBadgeInset,
                                       top: _collapseBadgeInset,
@@ -2315,6 +2532,10 @@ class _GsnEditorState extends State<GsnEditor> {
     try {
       final fromNode = _nodes.firstWhere((n) => n.id == edge.fromId);
       final toNode = _nodes.firstWhere((n) => n.id == edge.toId);
+      final special = _specialEdgeSegment(fromNode, toNode);
+      if (special != null) {
+        return _pointLineDistance(p, special.$1, special.$2) < 10;
+      }
       final diamondTop = _sideAttachedTypes.contains(toNode.type)
           ? null
           : _choiceDiamondTop(fromNode);
@@ -2345,6 +2566,9 @@ class _GsnEditorState extends State<GsnEditor> {
     final canBeUndeveloped =
         baseType == GsnNodeType.goal || baseType == GsnNodeType.strategy;
     final hasSupportChild = hasSupportingChild(node, _nodes, _edges);
+    final contract = _diagramInfo.isContract;
+    final isWholeRef = _wholeModuleReferenceTypes.contains(node.type) ||
+        _architectureTypes.contains(node.type);
 
     final result = await showDialog<NodeEditResult>(
       context: context,
@@ -2356,12 +2580,27 @@ class _GsnEditorState extends State<GsnEditor> {
         initialIsPublic: node.public,
         initialIsUndeveloped: node.undeveloped,
         initialChoice: node.choice,
-        isModuleReference: node.type == GsnNodeType.moduleReference,
+        initialChoiceMultiplicity: node.choiceMultiplicity,
+        initialChoiceCardinality: node.choiceCardinality,
+        initialAcp: node.acp,
+        initialContractPending: node.contractPending,
+        isModuleReference: isWholeRef,
+        moduleFieldLabel: switch (node.type) {
+          GsnNodeType.archModule => 'モジュール名',
+          GsnNodeType.archContract => '契約モジュール名',
+          GsnNodeType.contractReference => '参照先の契約モジュール名',
+          _ => '参照先のモジュール名',
+        },
         canReference: awayType != null,
-        canBePublic: awayType != null,
+        // 契約モジュールは公開する要素を持たない（1:4.7.3）
+        canBePublic: awayType != null && !contract,
         canBeUndeveloped: canBeUndeveloped,
         canChoose: canBeUndeveloped,
-        referenceBlockedReason: hasSupportChild
+        // ACP は成果物を参照する要素（Evidence / Context とその Away 版）に付ける（1:5.2.2）
+        canHaveAcp: baseType == GsnNodeType.evidence ||
+            baseType == GsnNodeType.context,
+        canBeContractPending: baseType == GsnNodeType.goal && !contract,
+        referenceBlockedReason: hasSupportChild && !contract
             ? 'この Goal の下に子があるので Away にできません。論証は参照先の図に書きます。'
             : null,
         undevelopedHint: canBeUndeveloped
@@ -2581,12 +2820,76 @@ class _GsnEditorState extends State<GsnEditor> {
     }
   }
 
+  // 契約モジュールでは使えない要素・印の数（1:4.2、1:4.7.3）
+  int _contractViolations() => _nodes
+      .where((n) =>
+          _wholeModuleReferenceTypes.contains(n.type) ||
+          n.public ||
+          n.contractPending)
+      .length;
+
+  Future<void> _editDiagramSettings() async {
+    final result = await showDialog<DiagramInfo>(
+      context: context,
+      builder: (_) => DiagramSettingsDialog(
+        initial: _diagramInfo.copy(),
+        contractViolations: _contractViolations(),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() => _diagramInfo = result);
+    _saveToLocalStorage();
+  }
+
+  Future<void> _showModuleInterface() async {
+    final sections = buildModuleInterface(_nodes, _edges,
+        moduleName: _openCloudName ?? '', info: _diagramInfo);
+    final text = moduleInterfaceText(sections);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        scrollable: true,
+        title: const Text('モジュールインタフェース'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final s in sections) ...[
+                Text(s.title, style: const TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                for (final item in s.items)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8, bottom: 2),
+                    child: SelectableText('・$item'),
+                  ),
+                const SizedBox(height: 10),
+              ],
+              Text('GSN v3 1:4.6 の既定のインタフェースを、今の図から組み立てています。',
+                  style: Theme.of(ctx).textTheme.bodySmall),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: text));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('インタフェースをコピーしました。')));
+              }
+            },
+            child: const Text('テキストでコピー'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('閉じる')),
+        ],
+      ),
+    );
+  }
+
   void _exportJson() {
-    final data = {
-      'nodes': _nodes.map((n) => n.toJson()).toList(),
-      'edges': _edges.map((e) => e.toJson()).toList()
-    };
-    final str = const JsonEncoder.withIndent('  ').convert(data);
+    final str = const JsonEncoder.withIndent('  ').convert(_diagramData());
     final bytes = utf8.encode(str);
     final blob = html.Blob([bytes]);
     final url = html.Url.createObjectUrlFromBlob(blob);
@@ -2729,12 +3032,7 @@ class _GsnEditorState extends State<GsnEditor> {
 
   Future<void> _writeToCloud(String name) async {
     // 中身はローカルの「JSON保存」と同じ形式
-    final data = {
-      'nodes': _nodes.map((n) => n.toJson()).toList(),
-      'edges': _edges.map((e) => e.toJson()).toList(),
-      'nodeCounter': _nodeCounter,
-    };
-    await _cloudService.save(name, jsonEncode(data));
+    await _cloudService.save(name, jsonEncode(_diagramData()));
     _cloudDiagramName = name;
     if (mounted) {
       setState(() => _openCloudName = name);
@@ -2767,6 +3065,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
         _absorbUndevelopedNodes(_nodes, _edges);
         _nodeCounter = data['nodeCounter'] ?? 0;
+        _diagramInfo = DiagramInfo.fromJson(data['diagram']);
       });
       _saveToLocalStorage();
       _cloudDiagramName = selected.name;
@@ -2919,13 +3218,32 @@ Widget _buildGsnShapeWidget(GsnNode node,
         child: awayElement,
       );
 
+    case GsnNodeType.instantiationData:
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: InstantiationDataPainter(label: node.label, isPalette: isPalette),
+      );
+
+    case GsnNodeType.archModule:
+    case GsnNodeType.archContract:
+      return CustomPaint(
+        size: Size(node.width, node.height),
+        painter: ModuleReferencePainter(
+            label: node.label,
+            module: node.module,
+            type: node.type,
+            isPalette: isPalette),
+      );
+
     case GsnNodeType.moduleReference:
+    case GsnNodeType.contractReference:
       final moduleRef = CustomPaint(
         size: Size(node.width, node.height),
         painter: ModuleReferencePainter(
             label: node.label,
             module: node.module,
             status: node.awayStatus,
+            type: node.type,
             isPalette: isPalette),
       );
       final refStatus = node.awayStatus;
@@ -3004,6 +3322,20 @@ class GsnPalette extends StatefulWidget {
       label: 'モジュール',
       types: [
         GsnNodeType.moduleReference,
+        GsnNodeType.contractReference,
+      ],
+    ),
+    _PaletteGroup(
+      label: 'パターン',
+      types: [
+        GsnNodeType.instantiationData,
+      ],
+    ),
+    _PaletteGroup(
+      label: '構成図',
+      types: [
+        GsnNodeType.archModule,
+        GsnNodeType.archContract,
       ],
     ),
     _PaletteGroup(
@@ -3356,6 +3688,31 @@ class ConnectingPreviewPainter extends CustomPainter {
       old.fromId != fromId || old.nodes != nodes || old.cursor != cursor;
 }
 
+// ★追加: 普通の親子の線とは違う描き方をする線の両端（描画とクリックの当たり判定で共用）。
+// - Instantiation Data Reference（1:3.5）: 要素の上辺の角から三角の頂点へ点線
+// - アーキテクチャ図（1:4.4）: モジュールの中心どうしを結ぶ線を、それぞれの箱の縁で切る
+// それ以外の線は null。
+(Offset, Offset)? _specialEdgeSegment(GsnNode from, GsnNode to) {
+  Rect rectOf(GsnNode n) =>
+      Rect.fromLTWH(n.position.dx, n.position.dy, n.width, n.height);
+  if (from.type == GsnNodeType.instantiationData) {
+    final idr = rectOf(from);
+    final el = rectOf(to);
+    final corner = idr.center.dx >= el.center.dx ? el.topRight : el.topLeft;
+    return (idr.topCenter, corner);
+  }
+  if (_architectureTypes.contains(from.type) &&
+      _architectureTypes.contains(to.type)) {
+    final a = rectOf(from);
+    final b = rectOf(to);
+    return (
+      ConnectingPreviewPainter._edgePointToward(a, b.center),
+      ConnectingPreviewPainter._edgePointToward(b, a.center),
+    );
+  }
+  return null;
+}
+
 class GsnEdgePainter extends CustomPainter {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
@@ -3503,6 +3860,30 @@ class GsnEdgePainter extends CustomPainter {
       }
 
       final isSelected = (connectingId == fromNode.id || connectingId == toNode.id);
+      final special = _specialEdgeSegment(fromNode, toNode);
+      if (special != null) {
+        final color = isRemovalMode
+            ? Colors.red.withOpacity(0.5)
+            : (isSelected ? Colors.blue.shade800 : Colors.black);
+        if (fromNode.type == GsnNodeType.instantiationData) {
+          final path = Path()
+            ..moveTo(special.$1.dx, special.$1.dy)
+            ..lineTo(special.$2.dx, special.$2.dy);
+          _drawDashedPath(
+              canvas,
+              path,
+              Paint()
+                ..color = color
+                ..strokeWidth = 1.2
+                ..style = PaintingStyle.stroke,
+              dashWidth: 2,
+              dashGap: 3);
+        } else {
+          _paintModuleLink(canvas, special.$1, special.$2, edge, color,
+              isSelected ? 2.5 : 1.5);
+        }
+        continue;
+      }
       // ★追加(Dialectic): "challenges"関係（GSN v3のDialectic拡張）は他の関係と区別できるよう
       // 破線・赤系の色で描画する。選択中/削除モードの色は従来通り優先する。
       final isChallenge = _isChallengesEdge(toNode);
@@ -3772,6 +4153,16 @@ Offset? _bend2;
         _paintMultiplicityBall(canvas, ballCenter, r, edge.multiplicity,
             paint.color, edge.cardinality);
       }
+
+      // GSN v3 1:5.2.1 の ACP: 線の途中（親寄り）に黒い四角と識別子
+      if (edge.acp.isNotEmpty && distance > 0) {
+        final segStart = _bend2 ?? _bend1 ?? startPoint;
+        final at = Offset.lerp(startPoint, segStart == startPoint ? endPoint : segStart, 0.4)!;
+        const double half = 5;
+        canvas.drawRect(Rect.fromCenter(center: at, width: half * 2, height: half * 2),
+            Paint()..color = paint.color);
+        _paintSmallLabel(canvas, edge.acp, at + const Offset(half + 4, 0));
+      }
     }
 
     for (final parent in choiceParents) {
@@ -3798,14 +4189,86 @@ Offset? _bend2;
     _paintSmallLabel(canvas, label, center + Offset(r + 3, -r - 2));
   }
 
+  // ★追加(GSN v3 1:4.4): アーキテクチャ図のモジュールどうしの線。両端の矢じりは線ごとに選べ、
+  // インタフェースの名前があれば、モジュールの縁に小さな四角とその名前を描く。
+  static void _paintModuleLink(Canvas canvas, Offset from, Offset to,
+      GsnEdge edge, Color color, double width) {
+    final d = to - from;
+    if (d.distance == 0) return;
+    final dir = d / d.distance;
+    const double connector = 7;
+    // インタフェースの四角があるときは、矢じりの先を四角の外側に置く
+    final tail = edge.fromInterface.isNotEmpty ? from + dir * (connector / 2) : from;
+    final head = edge.toInterface.isNotEmpty ? to - dir * (connector / 2) : to;
+    canvas.drawLine(
+        tail,
+        head,
+        Paint()
+          ..color = color
+          ..strokeWidth = width);
+    _paintModuleLinkEnd(canvas, head, dir, edge.archHead, color);
+    _paintModuleLinkEnd(canvas, tail, -dir, edge.archTail, color);
+    final normal = Offset(-dir.dy, dir.dx);
+    for (final (point, name) in [(from, edge.fromInterface), (to, edge.toInterface)]) {
+      if (name.isEmpty) continue;
+      final r = Rect.fromCenter(center: point, width: connector, height: connector);
+      canvas.drawRect(r, Paint()..color = Colors.white);
+      canvas.drawRect(
+          r,
+          Paint()
+            ..color = color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.2);
+      final side = normal.dx < 0 ? -normal : normal;
+      _paintSmallLabel(canvas, name, point + side * 8 + const Offset(2, 0));
+    }
+  }
+
+  // 線の端 tip に、向き dir（tip へ向かう向き）の矢じりを描く
+  static void _paintModuleLinkEnd(
+      Canvas canvas, Offset tip, Offset dir, ModuleLinkEnd kind, Color color) {
+    if (kind == ModuleLinkEnd.none) return;
+    const double len = 11;
+    final side = Offset(-dir.dy, dir.dx) * 5;
+    Path head(Offset t) => Path()
+      ..moveTo(t.dx, t.dy)
+      ..lineTo((t - dir * len + side).dx, (t - dir * len + side).dy)
+      ..lineTo((t - dir * len - side).dx, (t - dir * len - side).dy)
+      ..close();
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.3;
+    switch (kind) {
+      case ModuleLinkEnd.supported:
+        canvas.drawPath(head(tip), Paint()..color = color);
+      case ModuleLinkEnd.context:
+        canvas.drawPath(head(tip), Paint()..color = Colors.white);
+        canvas.drawPath(head(tip), stroke);
+      case ModuleLinkEnd.composite:
+        // 開いた矢じりを 2 つ重ねる（≫）
+        for (final t in [tip, tip - dir * 6]) {
+          canvas.drawLine(t, t - dir * len + side, stroke);
+          canvas.drawLine(t, t - dir * len - side, stroke);
+        }
+      case ModuleLinkEnd.none:
+        break;
+    }
+  }
+
   // Choice: 親の下辺から菱形までの幹と、黒塗りの菱形、横の注記を描く
   static void _paintChoice(Canvas canvas, GsnNode parent) {
     final top = _choiceDiamondTop(parent)!;
     final stroke = Paint()
       ..color = Colors.black
       ..strokeWidth = 2;
-    canvas.drawLine(
-        Offset(top.dx, parent.position.dy + parent.height), top, stroke);
+    final trunkTop = Offset(top.dx, parent.position.dy + parent.height);
+    canvas.drawLine(trunkTop, top, stroke);
+    // GSN v3 2:8.1.6: 菱形の手前の印は、選んだ子の全体に対する個数
+    if (parent.choiceMultiplicity != EdgeMultiplicity.none) {
+      _paintMultiplicityBall(canvas, top.translate(0, -7), 5,
+          parent.choiceMultiplicity, Colors.black, parent.choiceCardinality);
+    }
     final w = _choiceDiamondSize.width / 2;
     final h = _choiceDiamondSize.height;
     final path = Path()
@@ -4116,14 +4579,41 @@ const double _choiceTrunkLength = 16;
 // Choice を付けた要素の、菱形の上の頂点。Choice が無ければ null。
 Offset? _choiceDiamondTop(GsnNode n) {
   if (n.choice == null) return null;
+  // 幹に丸の印を付けるときは、丸が入るよう幹を長くする
+  final trunk = _choiceTrunkLength +
+      (n.choiceMultiplicity == EdgeMultiplicity.none ? 0 : 12);
   return Offset(n.position.dx + n.width / 2,
-      n.position.dy + n.height + _nodeMarkersHeight(n) + _choiceTrunkLength);
+      n.position.dy + n.height + _nodeMarkersHeight(n) + trunk);
 }
 
+// ★追加(GSN v3): 下辺の中央に付ける印のうち、未具体化の三角を重ねられる土台の印。
+// GSN v3 では印を上下に並べず、三角を土台に重ねて 1 つの記号にする
+// （未展開＋未具体化 1:3.3、契約で支える予定＋未具体化 1:4.2、ACP＋未具体化 1:5.2.2）。
+enum _BaseMarker { undeveloped, contract, acp }
+
+const Size _contractMarkerSize = Size(20, 14);
+const Size _acpMarkerSize = Size(12, 12);
+
+List<_BaseMarker> _baseMarkers(GsnNode node) => [
+      if (node.undeveloped) _BaseMarker.undeveloped,
+      if (node.contractPending) _BaseMarker.contract,
+      if (node.acp.isNotEmpty) _BaseMarker.acp,
+    ];
+
+double _baseMarkerHeight(_BaseMarker m) => switch (m) {
+      _BaseMarker.undeveloped => _undevelopedMarkerSize.height,
+      _BaseMarker.contract => _contractMarkerSize.height,
+      _BaseMarker.acp => _acpMarkerSize.height + 2,
+    };
+
 // ノード下辺から下に描く印の高さの合計（PDFの外接矩形の計算に使う）
-double _nodeMarkersHeight(GsnNode node) =>
-    (_isUninstantiated(node) ? _uninstantiatedMarkerSize.height : 0) +
-    (node.undeveloped ? _undevelopedMarkerSize.height : 0);
+double _nodeMarkersHeight(GsnNode node) {
+  final bases = _baseMarkers(node);
+  if (bases.isEmpty) {
+    return _isUninstantiated(node) ? _uninstantiatedMarkerSize.height : 0;
+  }
+  return bases.fold(0.0, (h, m) => h + _baseMarkerHeight(m));
+}
 
 final Paint _markerFillPaint = Paint()..color = Colors.white;
 final Paint _markerStrokePaint = Paint()
@@ -4131,17 +4621,74 @@ final Paint _markerStrokePaint = Paint()
   ..strokeWidth = 1.5
   ..style = PaintingStyle.stroke;
 
-// 印を上下に並べて描く: 下辺のすぐ下に未具体化の三角、その下に未展開の菱形（両方付くとき）
+// 下辺の中央に印を描く。未具体化の三角は、土台の印（未展開・契約で支える予定・ACP）があれば
+// 最初の土台に重ね、なければ三角だけを描く。土台が 2 つ以上あるとき（本来は無い組み合わせ）は縦に並べる。
 void _paintNodeMarkers(Canvas canvas, GsnNode node) {
   if (_awayTargetTypes.containsValue(node.type) && node.public) {
     _paintPublicMarker(canvas, node);
   }
   var top = Offset(node.position.dx + node.width / 2, node.position.dy + node.height);
-  if (_isUninstantiated(node)) {
-    _paintUninstantiatedMarker(canvas, top);
-    top = top.translate(0, _uninstantiatedMarkerSize.height);
+  final uninstantiated = _isUninstantiated(node);
+  final bases = _baseMarkers(node);
+  if (bases.isEmpty) {
+    if (uninstantiated) _paintUninstantiatedMarker(canvas, top);
+    return;
   }
-  if (node.undeveloped) _paintUndevelopedMarker(canvas, top);
+  var overlay = uninstantiated;
+  for (final m in bases) {
+    switch (m) {
+      case _BaseMarker.undeveloped:
+        _paintUndevelopedMarker(canvas, top, overlay: overlay);
+      case _BaseMarker.contract:
+        _paintContractMarker(canvas, top, overlay: overlay);
+      case _BaseMarker.acp:
+        _paintAcpMarker(canvas, top, node.acp, overlay: overlay);
+    }
+    overlay = false;
+    top = top.translate(0, _baseMarkerHeight(m));
+  }
+}
+
+// ★追加(GSN v3 1:4.2): 「契約で支える予定」の印。契約の記号（左上と右下に小さな四角の付いた箱）を小さく描く。
+// 未具体化と重ねるときは箱の中に三角を描く。
+void _paintContractMarker(Canvas canvas, Offset top, {bool overlay = false}) {
+  final w = _contractMarkerSize.width;
+  final left = top.dx - w / 2;
+  final body = Rect.fromLTWH(left, top.dy + 3, w, 8);
+  final tab = Rect.fromLTWH(left, top.dy, 7, 3);
+  final foot = Rect.fromLTWH(left + w - 7, top.dy + 11, 7, 3);
+  for (final r in [tab, foot, body]) {
+    canvas.drawRect(r, _markerFillPaint);
+    canvas.drawRect(r, _markerStrokePaint..strokeWidth = 1.2);
+  }
+  _markerStrokePaint.strokeWidth = 1.5;
+  if (overlay) {
+    final path = Path()
+      ..moveTo(top.dx, body.top)
+      ..lineTo(top.dx + w / 2 - 1, body.bottom)
+      ..lineTo(top.dx - w / 2 + 1, body.bottom)
+      ..close();
+    canvas.drawPath(path, _markerStrokePaint..strokeWidth = 1.2);
+    _markerStrokePaint.strokeWidth = 1.5;
+  }
+}
+
+// ★追加(GSN v3 1:5.2.2): 要素に付ける ACP。黒い四角と、その右に識別子。
+// 未具体化と重ねるときは四角の上半分に白い三角を描く。
+void _paintAcpMarker(Canvas canvas, Offset top, String acp, {bool overlay = false}) {
+  final sq = Rect.fromLTWH(top.dx - _acpMarkerSize.width / 2, top.dy + 1,
+      _acpMarkerSize.width, _acpMarkerSize.height);
+  canvas.drawRect(sq, Paint()..color = Colors.black);
+  if (overlay) {
+    final path = Path()
+      ..moveTo(sq.center.dx, sq.top + 1)
+      ..lineTo(sq.right - 1, sq.center.dy)
+      ..lineTo(sq.left + 1, sq.center.dy)
+      ..close();
+    canvas.drawPath(path, Paint()..color = Colors.white);
+  }
+  GsnEdgePainter._paintSmallLabel(
+      canvas, acp, Offset(sq.right + 4, sq.center.dy));
 }
 
 // ★追加(GSN v3 モジュール拡張): 公開の印。要素の右上の内側に、モジュールの印（タブ付きの小さな箱）を描く。
@@ -4168,7 +4715,8 @@ void _paintUninstantiatedMarker(Canvas canvas, Offset top) {
   canvas.drawPath(path, _markerStrokePaint);
 }
 
-void _paintUndevelopedMarker(Canvas canvas, Offset top) {
+// 未展開の菱形。未具体化と重ねるときは菱形の中央に横線を引き、上半分を三角に見せる（1:3.3 表 1:3-2）。
+void _paintUndevelopedMarker(Canvas canvas, Offset top, {bool overlay = false}) {
   final w = _undevelopedMarkerSize.width / 2;
   final h = _undevelopedMarkerSize.height;
   final path = Path()
@@ -4179,6 +4727,10 @@ void _paintUndevelopedMarker(Canvas canvas, Offset top) {
     ..close();
   canvas.drawPath(path, _markerFillPaint);
   canvas.drawPath(path, _markerStrokePaint);
+  if (overlay) {
+    canvas.drawLine(Offset(top.dx - w, top.dy + h / 2),
+        Offset(top.dx + w, top.dy + h / 2), _markerStrokePaint);
+  }
 }
 
 // ノードの上に未具体化・未展開の印を重ねて描く（エディタと評価結果ビューアで共用）
@@ -4436,23 +4988,35 @@ class ModuleReferencePainter extends CustomPainter {
   final String module;
   final AwayStatus? status;
   final bool isPalette;
+  // ★追加(GSN v3 1:4.2 / 1:4.4): 同じ箱の形で描く 4 種類。
+  // Module Reference と Module（アーキテクチャ図）は左上にタブ、
+  // Contract Reference と Contract（アーキテクチャ図）は左上と右下に同じ大きさの小さな四角。
+  final GsnNodeType type;
   ModuleReferencePainter(
       {required this.label,
       required this.module,
       this.status,
-      this.isPalette = false});
+      this.isPalette = false,
+      this.type = GsnNodeType.moduleReference});
+
+  bool get _isContract =>
+      type == GsnNodeType.contractReference || type == GsnNodeType.archContract;
+  bool get _isArchitecture => _architectureTypes.contains(type);
 
   @override
   void paint(Canvas canvas, Size size) {
     final tabH = isPalette ? 7.0 : 10.0;
     final tabW = min(size.width * 0.35, isPalette ? 26.0 : 44.0);
-    final body = Rect.fromLTWH(0, tabH, size.width, size.height - tabH);
+    final body = Rect.fromLTWH(
+        0, tabH, size.width, size.height - tabH - (_isContract ? tabH : 0));
     final tab = Rect.fromLTWH(0, 0, tabW, tabH);
-    final fillColor = switch (status) {
-      AwayStatus.ok => Colors.green.shade50,
-      null || AwayStatus.notChecked => Colors.orange.shade50,
-      _ => Colors.red.shade50,
-    };
+    final fillColor = _isArchitecture
+        ? Colors.white
+        : switch (status) {
+            AwayStatus.ok => Colors.green.shade50,
+            null || AwayStatus.notChecked => Colors.orange.shade50,
+            _ => Colors.red.shade50,
+          };
     final fill = Paint()..color = fillColor;
     final border = Paint()
       ..color = Colors.black
@@ -4460,13 +5024,20 @@ class ModuleReferencePainter extends CustomPainter {
       ..strokeWidth = 1.2;
     canvas.drawRect(tab, fill);
     canvas.drawRect(tab, border);
+    if (_isContract) {
+      final foot = Rect.fromLTWH(size.width - tabW, body.bottom, tabW, tabH);
+      canvas.drawRect(foot, fill);
+      canvas.drawRect(foot, border);
+    }
     canvas.drawRect(body, fill);
     canvas.drawRect(body, border);
     if (isPalette) return;
 
     final moduleTp = TextPainter(
       text: TextSpan(
-        text: module.isEmpty ? 'モジュール未設定' : module,
+        text: module.isEmpty
+            ? (_isContract ? '契約モジュール未設定' : 'モジュール未設定')
+            : module,
         style: TextStyle(
             fontSize: 11,
             fontWeight: FontWeight.bold,
@@ -4506,7 +5077,50 @@ class ModuleReferencePainter extends CustomPainter {
       oldDelegate.label != label ||
       oldDelegate.module != module ||
       oldDelegate.status != status ||
+      oldDelegate.type != type ||
       oldDelegate.isPalette != isPalette;
+}
+
+// ★追加(GSN v3 1:3.5): Instantiation Data Reference。テンプレートの具体化データへの参照を、
+// 頂点が上の三角形の中に書く。GSN の要素ではなく、テンプレートの一番上の要素へ点線でつなぐ。
+class InstantiationDataPainter extends CustomPainter {
+  final String label;
+  final bool isPalette;
+  InstantiationDataPainter({required this.label, this.isPalette = false});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(size.width / 2, 0)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(path, Paint()..color = Colors.grey.shade100);
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = Colors.black
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2);
+    if (isPalette) return;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: label.isEmpty ? '<具体化データ>' : label,
+        style: TextStyle(
+            fontSize: 11, color: label.isEmpty ? Colors.black38 : Colors.black),
+      ),
+      textAlign: TextAlign.center,
+      maxLines: 2,
+      ellipsis: '…',
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: size.width * 0.6);
+    tp.paint(canvas,
+        Offset((size.width - tp.width) / 2, size.height - tp.height - 4));
+  }
+
+  @override
+  bool shouldRepaint(covariant InstantiationDataPainter oldDelegate) =>
+      oldDelegate.label != label || oldDelegate.isPalette != isPalette;
 }
 
 class _AwayGoalBodyPainter extends CustomPainter {

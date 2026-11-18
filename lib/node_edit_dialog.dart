@@ -3,6 +3,8 @@
 // 単体でテストできるようにしている（test/node_edit_dialog_test.dart）。
 import 'package:flutter/material.dart';
 
+import 'edge_edit_dialog.dart' show EdgeMultiplicity;
+
 /// ダイアログで「保存」を押したときの内容。
 class NodeEditResult {
   final String label;
@@ -14,6 +16,16 @@ class NodeEditResult {
   /// GSN v3 の Choice（子へ向かう線を菱形でまとめる）。null なら付けない。文字列は注記。
   final String? choice;
 
+  /// Choice の菱形の手前（幹）に付ける印と個数（GSN v3 2:8.1.6）
+  final EdgeMultiplicity choiceMultiplicity;
+  final String choiceCardinality;
+
+  /// 要素に付ける ACP の識別子（GSN v3 1:5.2.2）。空なら付けない。
+  final String acp;
+
+  /// 「契約で支える予定」の印（GSN v3 1:4.2）。未展開とは両立しない。
+  final bool contractPending;
+
   const NodeEditResult({
     required this.label,
     required this.isAway,
@@ -21,6 +33,10 @@ class NodeEditResult {
     required this.isPublic,
     required this.isUndeveloped,
     this.choice,
+    this.choiceMultiplicity = EdgeMultiplicity.none,
+    this.choiceCardinality = '',
+    this.acp = '',
+    this.contractPending = false,
   });
 }
 
@@ -33,6 +49,10 @@ class NodeEditDialog extends StatefulWidget {
   final bool initialIsPublic;
   final bool initialIsUndeveloped;
   final String? initialChoice;
+  final EdgeMultiplicity initialChoiceMultiplicity;
+  final String initialChoiceCardinality;
+  final String initialAcp;
+  final bool initialContractPending;
 
   /// 「別の図を参照する」を出すか。参照先になれる種類の要素だけ true。
   final bool canReference;
@@ -45,6 +65,15 @@ class NodeEditDialog extends StatefulWidget {
 
   /// 「選択（Choice）」を出すか。下の子へ線を伸ばす Goal / Strategy だけ true。
   final bool canChoose;
+
+  /// ACP を付けられるか（成果物を参照する Evidence / Context など）
+  final bool canHaveAcp;
+
+  /// 「契約で支える予定」を付けられるか（Goal だけ。契約モジュールでは付けられない）
+  final bool canBeContractPending;
+
+  /// モジュール名の欄の見出し（アーキテクチャ図の Module では「モジュール名」）
+  final String moduleFieldLabel;
 
   /// 普通の要素から Away にできない理由。null なら切り替えられる。
   final String? referenceBlockedReason;
@@ -65,12 +94,19 @@ class NodeEditDialog extends StatefulWidget {
     this.initialIsPublic = false,
     this.initialIsUndeveloped = false,
     this.initialChoice,
+    this.initialChoiceMultiplicity = EdgeMultiplicity.none,
+    this.initialChoiceCardinality = '',
+    this.initialAcp = '',
+    this.initialContractPending = false,
     this.canReference = false,
     this.isModuleReference = false,
     this.canBePublic = false,
     this.canBeUndeveloped = false,
     this.canChoose = false,
+    this.canHaveAcp = false,
+    this.canBeContractPending = false,
     this.referenceBlockedReason,
+    this.moduleFieldLabel = '参照先のモジュール名',
     this.undevelopedHint,
     this.pickModule,
     this.pickClaim,
@@ -91,17 +127,25 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
   late bool _hasChoice = widget.initialChoice != null;
   late final TextEditingController _choiceCtl =
       TextEditingController(text: widget.initialChoice ?? '');
+  late EdgeMultiplicity _choiceMultiplicity = widget.initialChoiceMultiplicity;
+  late final TextEditingController _choiceCardinalityCtl =
+      TextEditingController(text: widget.initialChoiceCardinality);
+  late final TextEditingController _acpCtl =
+      TextEditingController(text: widget.initialAcp);
+  late bool _contractPending = widget.initialContractPending;
 
   @override
   void dispose() {
     _labelCtl.dispose();
     _moduleCtl.dispose();
     _choiceCtl.dispose();
+    _choiceCardinalityCtl.dispose();
+    _acpCtl.dispose();
     super.dispose();
   }
 
   void _submit() {
-    if (_labelCtl.text.isEmpty) {
+    if (_labelCtl.text.isEmpty && !widget.isModuleReference) {
       Navigator.pop(context);
       return;
     }
@@ -113,12 +157,21 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
         module: _isAway ? _moduleCtl.text.trim() : '',
         isPublic: !_isAway && widget.canBePublic && _isPublic,
         isUndeveloped: !_isAway && widget.canBeUndeveloped && _isUndeveloped,
-        choice: !_isAway && widget.canChoose && _hasChoice
-            ? _choiceCtl.text.trim()
-            : null,
+        choice: _choiceOn ? _choiceCtl.text.trim() : null,
+        choiceMultiplicity:
+            _choiceOn ? _choiceMultiplicity : EdgeMultiplicity.none,
+        choiceCardinality:
+            _choiceOn && _choiceMultiplicity == EdgeMultiplicity.many
+                ? _choiceCardinalityCtl.text.trim()
+                : '',
+        acp: widget.canHaveAcp ? _acpCtl.text.trim() : '',
+        contractPending:
+            !_isAway && widget.canBeContractPending && _contractPending,
       ),
     );
   }
+
+  bool get _choiceOn => !_isAway && widget.canChoose && _hasChoice;
 
   Future<void> _pickClaim() async {
     final claim = await widget.pickClaim?.call(_moduleCtl.text.trim());
@@ -131,7 +184,7 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
   }
 
   String get _labelText => widget.isModuleReference
-      ? '説明（参照先のモジュールが論じていること）'
+      ? '説明（任意）'
       : widget.typeName == 'Goal'
       ? '主張（参照先のゴールと同じ文面）'
       : '説明（参照先の ${widget.typeName} と同じ文面）';
@@ -162,7 +215,21 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
           label: const Text('未展開'),
           tooltip: widget.undevelopedHint ?? 'この先の論証はまだ書いていない',
           selected: _isUndeveloped,
-          onSelected: (v) => setState(() => _isUndeveloped = v),
+          onSelected: (v) => setState(() {
+            _isUndeveloped = v;
+            // 「契約で支える予定」とは両立しない（GSN v3 1:4.2）
+            if (v) _contractPending = false;
+          }),
+        ),
+      if (!_isAway && widget.canBeContractPending)
+        FilterChip(
+          label: const Text('契約で支える予定'),
+          tooltip: 'この主張は、まだ決めていない契約を通して別のモジュールの論証で支える',
+          selected: _contractPending,
+          onSelected: (v) => setState(() {
+            _contractPending = v;
+            if (v) _isUndeveloped = false;
+          }),
         ),
       if (!_isAway && widget.canChoose)
         FilterChip(
@@ -176,7 +243,7 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
       // 窓が低いときは中身をスクロールさせる（下にはみ出すのを防ぐ）
       scrollable: true,
       title: Text(widget.isModuleReference
-          ? 'Module Reference の編集'
+          ? '${widget.typeName} の編集'
           : _isAway
               ? 'Away ${widget.typeName} の編集'
               : 'ノード名編集'),
@@ -217,7 +284,7 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
                 ),
               ),
             ),
-          if (!_isAway && widget.canChoose && _hasChoice)
+          if (_choiceOn) ...[
             TextField(
               controller: _choiceCtl,
               decoration: const InputDecoration(
@@ -226,11 +293,48 @@ class _NodeEditDialogState extends State<NodeEditDialog> {
               ),
               onSubmitted: (_) => _submit(),
             ),
+            Row(
+              children: [
+                const Expanded(child: Text('菱形の手前の印')),
+                DropdownButton<EdgeMultiplicity>(
+                  value: _choiceMultiplicity,
+                  items: const [
+                    DropdownMenuItem(
+                        value: EdgeMultiplicity.none, child: Text('なし')),
+                    DropdownMenuItem(
+                        value: EdgeMultiplicity.many, child: Text('複数（●）')),
+                    DropdownMenuItem(
+                        value: EdgeMultiplicity.optional, child: Text('任意（○）')),
+                  ],
+                  onChanged: (v) => setState(() => _choiceMultiplicity = v!),
+                ),
+              ],
+            ),
+            if (_choiceMultiplicity == EdgeMultiplicity.many)
+              TextField(
+                controller: _choiceCardinalityCtl,
+                decoration: const InputDecoration(
+                  labelText: '選択全体の個数（任意）',
+                  hintText: '例: n、0..x',
+                ),
+                onSubmitted: (_) => _submit(),
+              ),
+          ],
+          if (widget.canHaveAcp)
+            TextField(
+              controller: _acpCtl,
+              decoration: const InputDecoration(
+                labelText: 'ACP（任意）',
+                hintText: '例: ACP1、ACP1[Confidence]',
+                helperText: '参照する成果物への確信を別の論証で示すときの識別子（■）',
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
           if (_isAway)
             TextField(
               controller: _moduleCtl,
               decoration: InputDecoration(
-                labelText: '参照先のモジュール名',
+                labelText: widget.moduleFieldLabel,
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.folder_special),
                   tooltip: 'アカウントに保存した図から選ぶ',

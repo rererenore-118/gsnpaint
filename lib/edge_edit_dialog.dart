@@ -32,15 +32,66 @@ EdgeMultiplicity edgeMultiplicityFromJson(Object? value) {
 /// 保存形式の文字列。印なしは null（JSON に書かない）。
 String? edgeMultiplicityToJson(EdgeMultiplicity m) => _multiplicityNames[m];
 
+/// アーキテクチャ図（GSN v3 1:4.4）でモジュールどうしをつなぐ線の端の形。
+enum ModuleLinkEnd {
+  /// 矢じりなし
+  none,
+
+  /// 黒塗りの矢じり（ModuleSupportedBy）
+  supported,
+
+  /// 白抜きの矢じり（ModuleInContextOf）
+  context,
+
+  /// 二重の開いた矢じり（支えと文脈の両方: Composite）
+  composite,
+}
+
+ModuleLinkEnd moduleLinkEndFromJson(Object? value, ModuleLinkEnd fallback) {
+  for (final e in ModuleLinkEnd.values) {
+    if (e.name == value) return e;
+  }
+  return fallback;
+}
+
+const moduleLinkEndNames = {
+  ModuleLinkEnd.none: 'なし',
+  ModuleLinkEnd.supported: '支える（▶）',
+  ModuleLinkEnd.context: '文脈（▷）',
+  ModuleLinkEnd.composite: '両方（≫）',
+};
+
+/// 線の設定ダイアログで扱える線の種類
+enum EdgeEditKind {
+  /// GSN の要素どうしの線: Multiplicity / Optionality と ACP
+  gsn,
+
+  /// アーキテクチャ図のモジュールどうしの線: 両端の矢じりとインタフェース
+  architecture,
+
+  /// それ以外（λ計算など）: 削除だけ
+  other,
+}
+
 /// ダイアログの結果。[delete] が true なら線を消す。
 class EdgeEditResult {
   final EdgeMultiplicity multiplicity;
   final String cardinality;
+  final String acp;
+  final ModuleLinkEnd archHead;
+  final ModuleLinkEnd archTail;
+  final String fromInterface;
+  final String toInterface;
   final bool delete;
 
   const EdgeEditResult({
     this.multiplicity = EdgeMultiplicity.none,
     this.cardinality = '',
+    this.acp = '',
+    this.archHead = ModuleLinkEnd.supported,
+    this.archTail = ModuleLinkEnd.none,
+    this.fromInterface = '',
+    this.toInterface = '',
     this.delete = false,
   });
 }
@@ -48,18 +99,32 @@ class EdgeEditResult {
 class EdgeEditDialog extends StatefulWidget {
   /// 「Goal → Strategy」のような、どの線かの説明
   final String title;
+  final EdgeEditKind kind;
   final EdgeMultiplicity initialMultiplicity;
   final String initialCardinality;
+  final String initialAcp;
+  final ModuleLinkEnd initialArchHead;
+  final ModuleLinkEnd initialArchTail;
+  final String initialFromInterface;
+  final String initialToInterface;
 
-  /// 印を付けられる線か（GSN の要素どうしの線だけ）。false なら削除だけ出す。
-  final bool canDecorate;
+  /// 始点・終点のモジュール名（アーキテクチャ図の線で、インタフェース欄の見出しに使う）
+  final String fromName;
+  final String toName;
 
   const EdgeEditDialog({
     super.key,
     required this.title,
+    this.kind = EdgeEditKind.gsn,
     this.initialMultiplicity = EdgeMultiplicity.none,
     this.initialCardinality = '',
-    this.canDecorate = true,
+    this.initialAcp = '',
+    this.initialArchHead = ModuleLinkEnd.supported,
+    this.initialArchTail = ModuleLinkEnd.none,
+    this.initialFromInterface = '',
+    this.initialToInterface = '',
+    this.fromName = '始点',
+    this.toName = '終点',
   });
 
   @override
@@ -68,13 +133,23 @@ class EdgeEditDialog extends StatefulWidget {
 
 class _EdgeEditDialogState extends State<EdgeEditDialog> {
   late EdgeMultiplicity _multiplicity = widget.initialMultiplicity;
-  late final TextEditingController _cardinalityCtl = TextEditingController(
+  late final _cardinalityCtl = TextEditingController(
     text: widget.initialCardinality,
   );
+  late final _acpCtl = TextEditingController(text: widget.initialAcp);
+  late ModuleLinkEnd _head = widget.initialArchHead;
+  late ModuleLinkEnd _tail = widget.initialArchTail;
+  late final _fromIfCtl = TextEditingController(
+    text: widget.initialFromInterface,
+  );
+  late final _toIfCtl = TextEditingController(text: widget.initialToInterface);
 
   @override
   void dispose() {
     _cardinalityCtl.dispose();
+    _acpCtl.dispose();
+    _fromIfCtl.dispose();
+    _toIfCtl.dispose();
     super.dispose();
   }
 
@@ -88,6 +163,11 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
             _multiplicity == EdgeMultiplicity.many
                 ? _cardinalityCtl.text.trim()
                 : '',
+        acp: _acpCtl.text.trim(),
+        archHead: _head,
+        archTail: _tail,
+        fromInterface: _fromIfCtl.text.trim(),
+        toInterface: _toIfCtl.text.trim(),
       ),
     );
   }
@@ -101,55 +181,110 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
         contentPadding: EdgeInsets.zero,
       );
 
+  Widget _gsnContent(BuildContext context) => RadioGroup<EdgeMultiplicity>(
+    groupValue: _multiplicity,
+    onChanged: (v) => setState(() => _multiplicity = v!),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _option(EdgeMultiplicity.none, '印なし', '1 対 1 の関係'),
+        _option(EdgeMultiplicity.many, '複数（●）', '先の要素が複数ある。個数を書かなければ 1 以上'),
+        if (_multiplicity == EdgeMultiplicity.many)
+          Padding(
+            padding: const EdgeInsets.only(left: 32, bottom: 8),
+            child: TextField(
+              controller: _cardinalityCtl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: '個数（任意）',
+                hintText: '例: n、0..x、2',
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+          ),
+        _option(EdgeMultiplicity.optional, '任意（○）', 'この線と先の論証はあってもなくてもよい'),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _acpCtl,
+          decoration: const InputDecoration(
+            labelText: 'ACP（任意）',
+            hintText: '例: ACP1、ACP1[Confidence]',
+            helperText: 'この関係への確信を別の論証で示すときの識別子（■）',
+          ),
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'GSN のパターン・確信の論証の記法です。評価には影響しません。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    ),
+  );
+
+  Widget _endPicker(
+    String label,
+    ModuleLinkEnd value,
+    ValueChanged<ModuleLinkEnd> onChanged,
+  ) => Row(
+    children: [
+      Expanded(child: Text(label)),
+      DropdownButton<ModuleLinkEnd>(
+        value: value,
+        items: [
+          for (final e in ModuleLinkEnd.values)
+            DropdownMenuItem(value: e, child: Text(moduleLinkEndNames[e]!)),
+        ],
+        onChanged: (v) => setState(() => onChanged(v!)),
+      ),
+    ],
+  );
+
+  Widget _architectureContent(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _endPicker('${widget.toName} 側の矢じり', _head, (v) => _head = v),
+      _endPicker('${widget.fromName} 側の矢じり', _tail, (v) => _tail = v),
+      TextField(
+        controller: _fromIfCtl,
+        decoration: InputDecoration(
+          labelText: '${widget.fromName} のインタフェース（任意）',
+          hintText: '例: interface_1',
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      TextField(
+        controller: _toIfCtl,
+        decoration: InputDecoration(
+          labelText: '${widget.toName} のインタフェース（任意）',
+          hintText: '例: interface_1',
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        '支える: ModuleSupportedBy、文脈: ModuleInContextOf、両方: Composite。'
+        'インタフェースを書くと、モジュールの縁に小さな四角を描きます。',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) {
+    final canEdit = widget.kind != EdgeEditKind.other;
     return AlertDialog(
       scrollable: true,
       title: Text(widget.title),
       content: SizedBox(
-        width: 360,
-        child:
-            widget.canDecorate
-                ? RadioGroup<EdgeMultiplicity>(
-                  groupValue: _multiplicity,
-                  onChanged: (v) => setState(() => _multiplicity = v!),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _option(EdgeMultiplicity.none, '印なし', '1 対 1 の関係'),
-                      _option(
-                        EdgeMultiplicity.many,
-                        '複数（●）',
-                        '先の要素が複数ある。個数を書かなければ 1 以上',
-                      ),
-                      if (_multiplicity == EdgeMultiplicity.many)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 32, bottom: 8),
-                          child: TextField(
-                            controller: _cardinalityCtl,
-                            autofocus: true,
-                            decoration: const InputDecoration(
-                              labelText: '個数（任意）',
-                              hintText: '例: n、0..x、2',
-                            ),
-                            onSubmitted: (_) => _submit(),
-                          ),
-                        ),
-                      _option(
-                        EdgeMultiplicity.optional,
-                        '任意（○）',
-                        'この線と先の論証はあってもなくてもよい',
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'GSN のパターン用の記法です。評価には影響しません。',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                )
-                : const Text('この線には印を付けられません。'),
+        width: 380,
+        child: switch (widget.kind) {
+          EdgeEditKind.gsn => _gsnContent(context),
+          EdgeEditKind.architecture => _architectureContent(context),
+          EdgeEditKind.other => const Text('この線には印を付けられません。'),
+        },
       ),
       actions: [
         TextButton(
@@ -162,8 +297,7 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
           onPressed: () => Navigator.pop(context),
           child: const Text('キャンセル'),
         ),
-        if (widget.canDecorate)
-          TextButton(onPressed: _submit, child: const Text('保存')),
+        if (canEdit) TextButton(onPressed: _submit, child: const Text('保存')),
       ],
     );
   }

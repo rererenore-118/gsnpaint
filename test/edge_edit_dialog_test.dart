@@ -29,7 +29,7 @@ void main() {
     final results = await open(tester, const EdgeEditDialog(title: 'Goal → Goal の線'));
     await tester.tap(find.text('複数（●）'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), ' 0..x ');
+    await tester.enterText(find.widgetWithText(TextField, '個数（任意）'), ' 0..x ');
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     expect(results.single!.multiplicity, EdgeMultiplicity.many);
@@ -46,7 +46,7 @@ void main() {
             initialCardinality: 'n'));
     await tester.tap(find.text('任意（○）'));
     await tester.pumpAndSettle();
-    expect(find.byType(TextField), findsNothing);
+    expect(find.widgetWithText(TextField, '個数（任意）'), findsNothing);
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     expect(results.single!.multiplicity, EdgeMultiplicity.optional);
@@ -55,7 +55,7 @@ void main() {
 
   testWidgets('GSN 以外の線は削除だけ', (tester) async {
     final results =
-        await open(tester, const EdgeEditDialog(title: 't', canDecorate: false));
+        await open(tester, const EdgeEditDialog(title: 't', kind: EdgeEditKind.other));
     expect(find.text('保存'), findsNothing);
     await tester.tap(find.text('線を削除'));
     await tester.pumpAndSettle();
@@ -68,5 +68,37 @@ void main() {
     }
     expect(edgeMultiplicityToJson(EdgeMultiplicity.none), isNull);
     expect(edgeMultiplicityFromJson('unknown'), EdgeMultiplicity.none);
+  });
+
+  testWidgets('線に ACP を付けられる', (tester) async {
+    final results = await open(tester, const EdgeEditDialog(title: 't'));
+    await tester.enterText(find.widgetWithText(TextField, 'ACP（任意）'), ' ACP1 ');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(results.single!.acp, 'ACP1');
+  });
+
+  testWidgets('アーキテクチャ図の線は矢じりとインタフェースを選べる', (tester) async {
+    final results = await open(
+        tester,
+        const EdgeEditDialog(
+            title: 'M1 → M2 の線',
+            kind: EdgeEditKind.architecture,
+            fromName: 'M1',
+            toName: 'M2'));
+    expect(find.text('ACP（任意）'), findsNothing);
+    await tester.tap(find.text('なし'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('両方（≫）').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextField, 'M2 のインタフェース（任意）'), 'interface_1');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    final r = results.single!;
+    expect(r.archHead, ModuleLinkEnd.supported);
+    expect(r.archTail, ModuleLinkEnd.composite);
+    expect(r.toInterface, 'interface_1');
+    expect(r.fromInterface, '');
   });
 }

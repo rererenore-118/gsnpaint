@@ -8,7 +8,17 @@
 // 評価用Python は Firestore を読めないので、参照先の読み込みと照合はすべてここで行う。
 part of 'main.dart';
 
-enum AwayStatus { ok, moduleMissing, goalMissing, notPublic, noTopGoal, manyTopGoals, notChecked }
+enum AwayStatus {
+  ok,
+  moduleMissing,
+  goalMissing,
+  notPublic,
+  noTopGoal,
+  manyTopGoals,
+  notContract,
+  contractShape,
+  notChecked,
+}
 
 String _awayStatusText(AwayStatus s) => switch (s) {
       AwayStatus.ok => '参照OK',
@@ -17,13 +27,17 @@ String _awayStatusText(AwayStatus s) => switch (s) {
       AwayStatus.notPublic => '公開されていません',
       AwayStatus.noTopGoal => 'トップの Goal がありません',
       AwayStatus.manyTopGoals => 'トップの Goal が 1 つに決まりません',
+      AwayStatus.notContract => '契約モジュールではありません（図の設定）',
+      AwayStatus.contractShape => '契約の一番上の要素を支えるものが 1 つに決まりません',
       AwayStatus.notChecked => '未確認',
     };
 
 class ModuleGraph {
   final List<GsnNode> nodes;
   final List<GsnEdge> edges;
-  ModuleGraph(this.nodes, this.edges);
+  // 図の設定で契約モジュールにした図か（Contract Reference の参照先になれる）
+  final bool isContract;
+  ModuleGraph(this.nodes, this.edges, {this.isContract = false});
 }
 
 class ModuleResolver {
@@ -52,6 +66,7 @@ class ModuleResolver {
       graph = ModuleGraph(
         (data['nodes'] as List).map((n) => GsnNode.fromJson(n)).toList(),
         (data['edges'] as List).map((e) => GsnEdge.fromJson(e)).toList(),
+        isContract: DiagramInfo.fromJson(data['diagram']).isContract,
       );
     }
     return _cache[name] = graph;
@@ -85,9 +100,39 @@ class ModuleResolver {
     return (AwayStatus.ok, tops.single, graph);
   }
 
+  /// Contract Reference の参照先: 契約モジュールの一番上の要素（支えられる側の Goal / Away Goal）を
+  /// 支えている要素。差し込むときは、参照元でこの要素を支えにする（1:4.7.2）。
+  /// 一番上の要素とそれを支える要素が、どちらもちょうど 1 つのときだけ見つかったとする。
+  Future<(AwayStatus, GsnNode?, ModuleGraph?)> findContractSupport(
+      String module) async {
+    final graph = await _load(module);
+    if (graph == null) return (AwayStatus.moduleMissing, null, null);
+    if (!graph.isContract) return (AwayStatus.notContract, null, graph);
+    final childIds = {for (final e in graph.edges) e.toId};
+    const topTypes = {GsnNodeType.goal, GsnNodeType.awayGoal};
+    final tops = graph.nodes
+        .where((n) => topTypes.contains(n.type) && !childIds.contains(n.id))
+        .toList();
+    if (tops.isEmpty) return (AwayStatus.noTopGoal, null, graph);
+    if (tops.length > 1) return (AwayStatus.manyTopGoals, null, graph);
+    final byId = {for (final n in graph.nodes) n.id: n};
+    final supports = [
+      for (final e in graph.edges)
+        if (e.fromId == tops.single.id &&
+            byId[e.toId] != null &&
+            !_allSideTypes.contains(byId[e.toId]!.type))
+          byId[e.toId]!
+    ];
+    if (supports.length != 1) return (AwayStatus.contractShape, null, graph);
+    return (AwayStatus.ok, supports.single, graph);
+  }
+
   // 参照する要素の種類に応じて、参照先を探す
   Future<(AwayStatus, GsnNode?, ModuleGraph?)> _findFor(GsnNode n) {
     if (n.type == GsnNodeType.moduleReference) return findTopGoal(n.module);
+    if (n.type == GsnNodeType.contractReference) {
+      return findContractSupport(n.module);
+    }
     return find(n.module, n.label, _awayTargetTypes[n.type]!);
   }
 
@@ -139,7 +184,7 @@ class ModuleResolver {
           .toList();
       final subEdges = graph.edges
           .where((e) => ids.contains(e.fromId) && ids.contains(e.toId))
-          .map((e) => GsnEdge(idMap[e.fromId]!, idMap[e.toId]!))
+          .map((e) => e.copyWith(fromId: idMap[e.fromId]!, toId: idMap[e.toId]!))
           .toList();
       // 差し込んだ部分の一番上の要素に参照先のモジュール名を付ける（評価結果で境目を描く）
       final root = idMap[target.id]!;

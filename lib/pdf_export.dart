@@ -177,8 +177,18 @@ void _paintNodeToCanvas(Canvas canvas, GsnNode node,
       painter = DefeaterPainter(backed: defeaterBacked);
       break;
     case GsnNodeType.moduleReference:
+    case GsnNodeType.contractReference:
+    case GsnNodeType.archModule:
+    case GsnNodeType.archContract:
       painter = ModuleReferencePainter(
-          label: node.label, module: node.module, status: node.awayStatus);
+          label: node.label,
+          module: node.module,
+          status: node.awayStatus,
+          type: node.type);
+      drawLabel = false;
+      break;
+    case GsnNodeType.instantiationData:
+      painter = InstantiationDataPainter(label: node.label);
       drawLabel = false;
       break;
     case GsnNodeType.awayGoal:

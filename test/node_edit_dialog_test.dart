@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gsnpaint/node_edit_dialog.dart';
+import 'package:gsnpaint/edge_edit_dialog.dart';
 
 /// ダイアログを開き、閉じたときの結果を results に入れる。
 Future<List<NodeEditResult?>> open(WidgetTester tester, NodeEditDialog dialog) async {
@@ -219,5 +220,61 @@ void main() {
     await tester.pumpAndSettle();
     await save(tester);
     expect(results.single!.choice, isNull);
+  });
+
+  testWidgets('「契約で支える予定」と「未展開」は片方しか付かない', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(
+          typeName: 'Goal',
+          initialLabel: 'G1',
+          canBeUndeveloped: true,
+          canBeContractPending: true,
+          initialIsUndeveloped: true),
+    );
+    await tester.tap(find.widgetWithText(FilterChip, '契約で支える予定'));
+    await tester.pumpAndSettle();
+    await save(tester);
+    expect(results.single!.contractPending, isTrue);
+    expect(results.single!.isUndeveloped, isFalse);
+  });
+
+  testWidgets('Evidence に ACP を付けられる', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(typeName: 'Evidence', initialLabel: 'E1', canHaveAcp: true),
+    );
+    await tester.enterText(find.widgetWithText(TextField, 'ACP（任意）'), 'ACP2');
+    await save(tester);
+    expect(results.single!.acp, 'ACP2');
+  });
+
+  testWidgets('Choice の幹に黒丸と個数を付けられる', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(
+          typeName: 'Goal', initialLabel: 'G1', canChoose: true, initialChoice: '1 of 3'),
+    );
+    await tester.tap(find.text('なし'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('複数（●）').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, '選択全体の個数（任意）'), 'n');
+    await save(tester);
+    expect(results.single!.choiceMultiplicity, EdgeMultiplicity.many);
+    expect(results.single!.choiceCardinality, 'n');
+  });
+
+  testWidgets('Module Reference などは説明が空でも保存できる', (tester) async {
+    final results = await open(
+      tester,
+      const NodeEditDialog(
+          typeName: 'Module', initialLabel: '', isModuleReference: true,
+          moduleFieldLabel: 'モジュール名'),
+    );
+    expect(find.text('Module の編集'), findsOneWidget);
+    await tester.enterText(find.widgetWithText(TextField, 'モジュール名'), 'M1');
+    await save(tester);
+    expect(results.single!.module, 'M1');
   });
 }
