@@ -36,6 +36,7 @@ import 'editor_shortcuts.dart';
 part 'pdf_export.dart';
 part 'module_interface.dart';
 part 'module_resolver.dart';
+part 'record_edges.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -549,6 +550,10 @@ class GsnEdge {
   ModuleLinkEnd archTail;
   String fromInterface;
   String toInterface;
+  // PGSN の Record: Record → 値の線（一本線、キー名で入れる）と、親 → Record の線
+  // （二重線、キー名の値を取り出す）。評価に送るときは RecordLabel / RecordAccess の要素に戻す。
+  RecordLink recordLink;
+  String recordKey;
   GsnEdge(this.fromId, this.toId,
       {this.multiplicity = EdgeMultiplicity.none,
       this.cardinality = '',
@@ -556,7 +561,9 @@ class GsnEdge {
       this.archHead = ModuleLinkEnd.supported,
       this.archTail = ModuleLinkEnd.none,
       this.fromInterface = '',
-      this.toInterface = ''});
+      this.toInterface = '',
+      this.recordLink = RecordLink.none,
+      this.recordKey = ''});
 
   factory GsnEdge.fromJson(Map<String, dynamic> json) {
     return GsnEdge(
@@ -569,6 +576,8 @@ class GsnEdge {
       archTail: moduleLinkEndFromJson(json['arch_tail'], ModuleLinkEnd.none),
       fromInterface: json['from_interface'] as String? ?? '',
       toInterface: json['to_interface'] as String? ?? '',
+      recordLink: recordLinkFromJson(json['record']),
+      recordKey: json['record_key'] as String? ?? '',
     );
   }
 
@@ -581,7 +590,9 @@ class GsnEdge {
       archHead: archHead,
       archTail: archTail,
       fromInterface: fromInterface,
-      toInterface: toInterface);
+      toInterface: toInterface,
+      recordLink: recordLink,
+      recordKey: recordKey);
 
   Map<String, dynamic> toJson() => {
         'from': fromId,
@@ -594,6 +605,8 @@ class GsnEdge {
         if (archTail != ModuleLinkEnd.none) 'arch_tail': archTail.name,
         if (fromInterface.isNotEmpty) 'from_interface': fromInterface,
         if (toInterface.isNotEmpty) 'to_interface': toInterface,
+        if (recordLink != RecordLink.none) 'record': recordLink.name,
+        if (recordLink != RecordLink.none) 'record_key': recordKey,
       };
 }
 
@@ -966,6 +979,16 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     }
 
+    // Record の線は、評価側が知っている RecordLabel / RecordAccess の要素に戻して送る
+    final noKey = recordEdgesWithoutKey(evalEdges);
+    if (noKey > 0) {
+      _showErrorDialog('キー名が空の Record の線が $noKey 本あります。線をクリックしてキー名を書いてください。');
+      return null;
+    }
+    final expanded = expandRecordEdges(evalNodes, evalEdges);
+    evalNodes = expanded.nodes;
+    evalEdges = expanded.edges;
+
     // 送信データ作成
     final Map<String, Object> requestData = {
       "nodes": evalNodes.map((n) => {
@@ -1036,6 +1059,8 @@ class _GsnEditorState extends State<GsnEditor> {
     final List<GsnEdge> resultEdges = edgeData
       .map((data) => GsnEdge.fromJson(data))
       .toList();
+    // 評価できずに元の図が返ってきたときなど、結果に残った Record の要素も線で見せる
+    absorbRecordNodes(resultNodes, resultEdges);
 
     // ★追加(GSN v3 モジュール拡張): 評価結果に残った Away Goal の参照先を確かめる。
     // {X} が置き換わったあとの文面で照合したいので、評価の後に行う。
@@ -1167,6 +1192,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _edges.addAll(
             (data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
         _absorbUndevelopedNodes(_nodes, _edges);
+        absorbRecordNodes(_nodes, _edges);
         _nodeCounter = data['nodeCounter'] ??
             (_nodes.isEmpty ? 0 : _nodes.map((n) => n.id).reduce(max) + 1);
         _diagramInfo = DiagramInfo.fromJson(data['diagram']);
@@ -1752,11 +1778,15 @@ class _GsnEditorState extends State<GsnEditor> {
           return;
         }
         _saveToHistory();
+        final edge = GsnEdge(_connecting!, node.id,
+            recordLink: recordLinkForNewEdge(parent, node));
         setState(() {
-          _edges.add(GsnEdge(_connecting!, node.id));
+          _edges.add(edge);
           _connecting = null;
         });
         _saveToLocalStorage();
+        // Record から値への線にはキー名が要るので、すぐに聞く
+        if (edge.recordLink == RecordLink.label) _editEdge(edge, justCreated: true);
       } else {
         setState(() => _connecting = null);
       }
@@ -1897,7 +1927,7 @@ class _GsnEditorState extends State<GsnEditor> {
   }
 
   // 線をクリックしたとき: GSN v3 の Multiplicity / Optionality の印を付け外しし、削除もここから行う
-  Future<void> _editEdge(GsnEdge edge) async {
+  Future<void> _editEdge(GsnEdge edge, {bool justCreated = false}) async {
     final from = _nodes.where((n) => n.id == edge.fromId).firstOrNull;
     final to = _nodes.where((n) => n.id == edge.toId).firstOrNull;
     if (from == null || to == null) return;
@@ -1925,12 +1955,16 @@ class _GsnEditorState extends State<GsnEditor> {
         initialArchTail: edge.archTail,
         initialFromInterface: edge.fromInterface,
         initialToInterface: edge.toInterface,
+        recordMode: recordEditModeFor(from, to, edge),
+        initialRecordLink: edge.recordLink,
+        initialRecordKey: edge.recordKey,
         fromName: nameOf(from),
         toName: nameOf(to),
       ),
     );
     if (result == null || !mounted) return;
-    _saveToHistory();
+    // 線を引いた直後のキー入力は、線を引いた操作と一緒に戻せるよう履歴を分けない
+    if (!justCreated) _saveToHistory();
     setState(() {
       if (result.delete) {
         _edges.remove(edge);
@@ -1942,7 +1976,9 @@ class _GsnEditorState extends State<GsnEditor> {
           ..archHead = result.archHead
           ..archTail = result.archTail
           ..fromInterface = result.fromInterface
-          ..toInterface = result.toInterface;
+          ..toInterface = result.toInterface
+          ..recordLink = result.recordLink
+          ..recordKey = result.recordKey;
       }
     });
     _saveToLocalStorage();
@@ -1976,6 +2012,7 @@ class _GsnEditorState extends State<GsnEditor> {
               .map((edgeData) => GsnEdge.fromJson(edgeData))
               .toList();
           _absorbUndevelopedNodes(newNodes, newEdges);
+          absorbRecordNodes(newNodes, newEdges);
 
           setState(() {
             _nodes.clear();
@@ -3064,6 +3101,7 @@ class _GsnEditorState extends State<GsnEditor> {
         _nodes.addAll((data['nodes'] as List).map((n) => GsnNode.fromJson(n)));
         _edges.addAll((data['edges'] as List).map((e) => GsnEdge.fromJson(e)));
         _absorbUndevelopedNodes(_nodes, _edges);
+        absorbRecordNodes(_nodes, _edges);
         _nodeCounter = data['nodeCounter'] ?? 0;
         _diagramInfo = DiagramInfo.fromJson(data['diagram']);
       });
@@ -3351,8 +3389,6 @@ class GsnPalette extends StatefulWidget {
       label: 'レコード',
       types: [
         GsnNodeType.record,
-        GsnNodeType.recordLabel,
-        GsnNodeType.recordAccess,
         GsnNodeType.stringLiteral,
       ],
     ),
@@ -3916,13 +3952,6 @@ Offset? _bend2;
       final bool fromIsSpecial = fromIsLambda || fromIsApplication || fromIsMap;
       final bool toIsSpecial = toIsLambda || toIsApplication || toIsMap;
 
-      final bool fromIsRecordLabel = fromNode.type == GsnNodeType.recordLabel;
-      final bool toIsRecordLabel = fromNode.type == GsnNodeType.recordLabel;
-      final bool fromIsRecordAccess = fromNode.type == GsnNodeType.recordAccess;
-      final bool toIsRecordAccess = fromNode.type == GsnNodeType.recordAccess;
-
-      final bool fromIsLiteral = fromIsRecordLabel || fromIsRecordAccess;
-      final bool toIsLiteral = toIsRecordLabel || fromIsRecordAccess;
 
 
 
@@ -4103,11 +4132,19 @@ Offset? _bend2;
       const double arrowSize = 9.0;
       final Offset arrowBase = arrowPoint - normalizedDirection * arrowSize;
       // 白抜きの矢じりの中を線が通らないよう、線は矢じりの底辺で止める
-      final Offset lineEnd = isInContextOf ? arrowBase : endPoint;
+      // Record から値を取り出す線（二重線）も、矢じりの脇から線がはみ出さないよう底辺で止める
+      final isRecordAccess = edge.recordLink == RecordLink.access;
+      final Offset lineEnd =
+          isInContextOf || isRecordAccess ? arrowBase : endPoint;
 
       // 線を描画（Map引数はL字折れ線、それ以外は直線）
       // ★追加(Dialectic): challengesエッジは破線で描画する
-      if (_bend1 != null) {
+      if (isRecordAccess) {
+        _drawDoubleLine(
+            canvas,
+            [startPoint, if (_bend1 != null) _bend1, if (_bend2 != null) _bend2, lineEnd],
+            paint);
+      } else if (_bend1 != null) {
         // L字折れ線: startPoint → bend1 → (bend2 →) endPoint
         final path = Path()
           ..moveTo(startPoint.dx, startPoint.dy)
@@ -4162,6 +4199,16 @@ Offset? _bend2;
         canvas.drawRect(Rect.fromCenter(center: at, width: half * 2, height: half * 2),
             Paint()..color = paint.color);
         _paintSmallLabel(canvas, edge.acp, at + const Offset(half + 4, 0));
+      }
+
+      // Record のキー名: 最後の区間の真ん中、線の右脇に書く。空なら赤で促す
+      if (edge.recordLink != RecordLink.none && distance > 0) {
+        final mid = Offset.lerp(arrowFrom, arrowBase, 0.5)!;
+        final key = edge.recordKey;
+        _paintSmallLabel(canvas, key.isEmpty ? 'キー名なし' : key,
+            mid + Offset(isRecordAccess ? 7 : 5, 0),
+            color: key.isEmpty ? Colors.red.shade700 : Colors.black,
+            italic: false);
       }
     }
 
@@ -4284,13 +4331,39 @@ Offset? _bend2;
     }
   }
 
+  // 二重線（Record から値を取り出す線）。折れ線の各区間を左右にずらした 2 本で描く。
+  // 折れ目では、隣の区間とのずれを埋めるよう区間を少し延ばす。
+  static void _drawDoubleLine(Canvas canvas, List<Offset> points, Paint paint) {
+    const double gap = 2.5;
+    final line = Paint()
+      ..color = paint.color
+      ..strokeWidth = paint.strokeWidth > 2 ? 1.8 : 1.4
+      ..style = PaintingStyle.stroke;
+    for (var i = 0; i + 1 < points.length; i++) {
+      final a = points[i];
+      final b = points[i + 1];
+      final d = b - a;
+      if (d.distance == 0) continue;
+      final dir = d / d.distance;
+      final normal = Offset(-dir.dy, dir.dx) * gap;
+      final head = i > 0 ? dir * gap : Offset.zero;
+      final tail = i + 2 < points.length ? dir * gap : Offset.zero;
+      for (final o in [normal, -normal]) {
+        canvas.drawLine(a + o - head, b + o + tail, line);
+      }
+    }
+  }
+
   // 線の印に添える小さな注記。anchor は文字の左端（縦方向は中央）
-  static void _paintSmallLabel(Canvas canvas, String text, Offset anchor) {
+  static void _paintSmallLabel(Canvas canvas, String text, Offset anchor,
+      {Color color = Colors.black, bool italic = true}) {
     final tp = TextPainter(
       text: TextSpan(
         text: text,
-        style: const TextStyle(
-            fontSize: 11, color: Colors.black, fontStyle: FontStyle.italic),
+        style: TextStyle(
+            fontSize: 11,
+            color: color,
+            fontStyle: italic ? FontStyle.italic : FontStyle.normal),
       ),
       textDirection: TextDirection.ltr,
     )..layout();

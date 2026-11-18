@@ -101,4 +101,50 @@ void main() {
     expect(r.toInterface, 'interface_1');
     expect(r.fromInterface, '');
   });
+
+  testWidgets('Record の下の線はキー名を書く（一本線）', (tester) async {
+    final results = await open(
+        tester,
+        const EdgeEditDialog(
+            title: 'Record → String の線',
+            kind: EdgeEditKind.other,
+            recordMode: RecordEditMode.label));
+    await tester.enterText(find.widgetWithText(TextField, 'キー名'), ' name ');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(results.single!.recordLink, RecordLink.label);
+    expect(results.single!.recordKey, 'name');
+  });
+
+  testWidgets('Record への線は取り出す線（二重線）にでき、外すとキーは消える', (tester) async {
+    final results = await open(
+        tester,
+        const EdgeEditDialog(
+            title: 't',
+            kind: EdgeEditKind.other,
+            recordMode: RecordEditMode.accessAllowed));
+    expect(find.widgetWithText(TextField, 'キー名'), findsNothing);
+    await tester.tap(find.text('Record から値を取り出す'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextField, 'キー名'), 'AAA');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(results.single!.recordLink, RecordLink.access);
+    expect(results.single!.recordKey, 'AAA');
+
+    final again = await open(
+        tester,
+        const EdgeEditDialog(
+            title: 't',
+            kind: EdgeEditKind.other,
+            recordMode: RecordEditMode.accessAllowed,
+            initialRecordLink: RecordLink.access,
+            initialRecordKey: 'AAA'));
+    await tester.tap(find.text('Record から値を取り出す'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(again.single!.recordLink, RecordLink.none);
+    expect(again.single!.recordKey, '');
+  });
 }

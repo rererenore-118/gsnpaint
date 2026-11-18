@@ -61,6 +61,39 @@ const moduleLinkEndNames = {
   ModuleLinkEnd.composite: '両方（≫）',
 };
 
+/// PGSN の Record を扱う線。以前は RecordLabel / RecordAccess という要素を線の途中に
+/// 置いていたが、親 1・子 1 のつなぎ方に名前を付けるだけなので、線の種類にした。
+/// 評価に送るときは要素に戻す（build_gsn.py は変えない）。
+enum RecordLink {
+  /// 普通の線
+  none,
+
+  /// Record → 値: その値をキー名で Record に入れる（一本線）
+  label,
+
+  /// 親 → Record: Record からキー名の値を取り出す（二重線）
+  access,
+}
+
+RecordLink recordLinkFromJson(Object? value) {
+  for (final e in RecordLink.values) {
+    if (e != RecordLink.none && e.name == value) return e;
+  }
+  return RecordLink.none;
+}
+
+/// 線の設定ダイアログで Record のキーをどう扱うか
+enum RecordEditMode {
+  /// Record の線ではない
+  none,
+
+  /// Record から値への線: 必ずキー名を付ける
+  label,
+
+  /// 子が Record（の値）になる線: 値を取り出す線にできる
+  accessAllowed,
+}
+
 /// 線の設定ダイアログで扱える線の種類
 enum EdgeEditKind {
   /// GSN の要素どうしの線: Multiplicity / Optionality と ACP
@@ -82,6 +115,8 @@ class EdgeEditResult {
   final ModuleLinkEnd archTail;
   final String fromInterface;
   final String toInterface;
+  final RecordLink recordLink;
+  final String recordKey;
   final bool delete;
 
   const EdgeEditResult({
@@ -92,6 +127,8 @@ class EdgeEditResult {
     this.archTail = ModuleLinkEnd.none,
     this.fromInterface = '',
     this.toInterface = '',
+    this.recordLink = RecordLink.none,
+    this.recordKey = '',
     this.delete = false,
   });
 }
@@ -107,6 +144,9 @@ class EdgeEditDialog extends StatefulWidget {
   final ModuleLinkEnd initialArchTail;
   final String initialFromInterface;
   final String initialToInterface;
+  final RecordEditMode recordMode;
+  final RecordLink initialRecordLink;
+  final String initialRecordKey;
 
   /// 始点・終点のモジュール名（アーキテクチャ図の線で、インタフェース欄の見出しに使う）
   final String fromName;
@@ -123,6 +163,9 @@ class EdgeEditDialog extends StatefulWidget {
     this.initialArchTail = ModuleLinkEnd.none,
     this.initialFromInterface = '',
     this.initialToInterface = '',
+    this.recordMode = RecordEditMode.none,
+    this.initialRecordLink = RecordLink.none,
+    this.initialRecordKey = '',
     this.fromName = '始点',
     this.toName = '終点',
   });
@@ -143,6 +186,8 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
     text: widget.initialFromInterface,
   );
   late final _toIfCtl = TextEditingController(text: widget.initialToInterface);
+  late bool _access = widget.initialRecordLink == RecordLink.access;
+  late final _keyCtl = TextEditingController(text: widget.initialRecordKey);
 
   @override
   void dispose() {
@@ -150,6 +195,7 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
     _acpCtl.dispose();
     _fromIfCtl.dispose();
     _toIfCtl.dispose();
+    _keyCtl.dispose();
     super.dispose();
   }
 
@@ -168,7 +214,51 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
         archTail: _tail,
         fromInterface: _fromIfCtl.text.trim(),
         toInterface: _toIfCtl.text.trim(),
+        recordLink: _recordLink,
+        recordKey: _recordLink == RecordLink.none ? '' : _keyCtl.text.trim(),
       ),
+    );
+  }
+
+  RecordLink get _recordLink => switch (widget.recordMode) {
+    RecordEditMode.label => RecordLink.label,
+    RecordEditMode.accessAllowed => _access ? RecordLink.access : RecordLink.none,
+    RecordEditMode.none => RecordLink.none,
+  };
+
+  Widget _keyField({required String hint}) => TextField(
+    controller: _keyCtl,
+    autofocus: true,
+    decoration: InputDecoration(labelText: 'キー名', hintText: hint),
+    onSubmitted: (_) => _submit(),
+  );
+
+  Widget _recordContent(BuildContext context) {
+    final small = Theme.of(context).textTheme.bodySmall;
+    if (widget.recordMode == RecordEditMode.label) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _keyField(hint: '例: name、version'),
+          const SizedBox(height: 8),
+          Text('先の値を、このキー名で Record に入れます（一本線）。', style: small),
+        ],
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Record から値を取り出す'),
+          subtitle: Text('先の Record から、キー名の値を取り出して使います（二重線）', style: small),
+          value: _access,
+          onChanged: (v) => setState(() => _access = v),
+        ),
+        if (_access) _keyField(hint: '例: name'),
+      ],
     );
   }
 
@@ -274,7 +364,9 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final canEdit = widget.kind != EdgeEditKind.other;
+    final canEdit =
+        widget.kind != EdgeEditKind.other ||
+        widget.recordMode != RecordEditMode.none;
     return AlertDialog(
       scrollable: true,
       title: Text(widget.title),
@@ -283,7 +375,10 @@ class _EdgeEditDialogState extends State<EdgeEditDialog> {
         child: switch (widget.kind) {
           EdgeEditKind.gsn => _gsnContent(context),
           EdgeEditKind.architecture => _architectureContent(context),
-          EdgeEditKind.other => const Text('この線には印を付けられません。'),
+          EdgeEditKind.other =>
+            widget.recordMode == RecordEditMode.none
+                ? const Text('この線には印を付けられません。')
+                : _recordContent(context),
         },
       ),
       actions: [
