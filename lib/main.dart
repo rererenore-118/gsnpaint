@@ -4286,14 +4286,16 @@ Offset? _bend2;
         _paintSmallLabel(canvas, edge.acp, at + const Offset(half + 4, 0));
       }
 
-      // Record のキー名: 最後の区間の真ん中、線の右脇に書く。空なら赤で促す
+      // Record のキー名: 最後の区間の真ん中に、線にかからないよう脇へ離して書く。空なら赤で促す
       if (edge.recordLink != RecordLink.none && distance > 0) {
         final mid = Offset.lerp(arrowFrom, arrowBase, 0.5)!;
         final key = edge.recordKey;
-        _paintSmallLabel(canvas, key.isEmpty ? 'キー名なし' : key,
-            mid + Offset(isRecordAccess ? 7 : 5, 0),
+        final (anchor, vAlign) = _recordKeyPlacement(
+            mid, normalizedDirection, isRecordAccess ? 9 : 7);
+        _paintSmallLabel(canvas, key.isEmpty ? 'キー名なし' : key, anchor,
             color: key.isEmpty ? Colors.red.shade700 : Colors.black,
-            italic: false);
+            italic: false,
+            vAlign: vAlign);
       }
     }
 
@@ -4440,8 +4442,23 @@ Offset? _bend2;
   }
 
   // 線の印に添える小さな注記。anchor は文字の左端（縦方向は中央）
+  // Record のキー名を置く位置。文字は線の右側に置き、線の傾きに合わせて上か下へ逃がす。
+  // 戻り値は文字の左端の点と、文字をその点の上（-1）・中央（0）・下（1）のどこに置くか。
+  //   縦に近い線: 右へ [gap] 離して中央
+  //   右下がり（左上がり）の線: 右上へ離して、点より上に置く（線は右へ行くほど下にある）
+  //   左下がり（右上がり）の線: 右下へ離して、点より下に置く（線は右へ行くほど上にある）
+  //   横に近い線: 上へ離して、点より上に置く
+  static (Offset, int) _recordKeyPlacement(Offset mid, Offset dir, double gap) {
+    if (dir.dx.abs() < 0.2) return (mid + Offset(gap, 0), 0);
+    if (dir.dy.abs() < 0.2) return (mid + Offset(-6, -gap * 0.6), -1);
+    final d = gap * 0.75;
+    return dir.dx * dir.dy > 0
+        ? (mid + Offset(d, -d), -1)
+        : (mid + Offset(d, d), 1);
+  }
+
   static void _paintSmallLabel(Canvas canvas, String text, Offset anchor,
-      {Color color = Colors.black, bool italic = true}) {
+      {Color color = Colors.black, bool italic = true, int vAlign = 0}) {
     final tp = TextPainter(
       text: TextSpan(
         text: text,
@@ -4452,7 +4469,12 @@ Offset? _bend2;
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    final topLeft = Offset(anchor.dx, anchor.dy - tp.height / 2);
+    final top = switch (vAlign) {
+      < 0 => anchor.dy - tp.height,
+      > 0 => anchor.dy,
+      _ => anchor.dy - tp.height / 2,
+    };
+    final topLeft = Offset(anchor.dx, top);
     canvas.drawRect((topLeft & tp.size).inflate(1),
         Paint()..color = Colors.white.withOpacity(0.85));
     tp.paint(canvas, topLeft);
