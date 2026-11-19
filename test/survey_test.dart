@@ -30,7 +30,7 @@ void main() {
     final csv = surveyResponsesToCsv([
       StoredSurveyResponse(
         respondent: 'uid1',
-        participantId: 'P01',
+        participantId: '',
         submittedAt: DateTime(2026, 11, 19, 9, 5),
         answers: {
           ...answers(List.filled(10, 3)),
@@ -39,13 +39,27 @@ void main() {
         },
       ),
     ]);
-    expect(csv.startsWith('﻿回答者,参加者番号,回答日時,gsn_exp,prog_exp,sus1,'), isTrue);
+    expect(csv.startsWith('﻿参加者番号,回答者,回答日時,gsn_exp,prog_exp,sus1,'), isTrue);
     final lines = csv.substring(1).split('\r\n');
     expect(lines[0].endsWith('sus10,sus_score,good,bad'), isTrue);
     expect(
       lines[1],
-      'uid1,P01,2026-11-19 09:05,seen,1to3,3,3,3,3,3,3,3,3,3,3,50.0,'
+      'P001,uid1,2026-11-19 09:05,seen,1to3,3,3,3,3,3,3,3,3,3,3,50.0,'
       '"見やすい, 速い","1行目\n""2行目"""',
     );
+  });
+
+  test('参加者番号は回答者に聞かず、回答日時の順に P001 から振る', () {
+    StoredSurveyResponse r(String uid, int day) => StoredSurveyResponse(
+      respondent: uid,
+      participantId: '',
+      submittedAt: DateTime(2026, 12, day),
+      answers: answers(List.filled(10, 3)),
+    );
+    final lines = surveyResponsesToCsv([r('c', 3), r('a', 1), r('b', 2)])
+        .substring(1)
+        .split('\r\n');
+    expect(lines.sublist(1, 4).map((l) => l.split(',').take(2).join(',')),
+        ['P001,a', 'P002,b', 'P003,c']);
   });
 }

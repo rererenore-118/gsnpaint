@@ -29,7 +29,7 @@ void main() {
     expect(submit().onPressed, isNull);
     expect(find.text('未回答 12 問'), findsOneWidget);
 
-    await tester.enterText(find.widgetWithText(TextField, '参加者番号（任意）'), ' P07 ');
+    expect(find.textContaining('参加者番号'), findsNothing);
     await tester.tap(find.text('自分で書いたことがある'));
     await tester.tap(find.text('3 年以上'));
     for (var i = 0; i < susItems.length; i++) {
@@ -48,7 +48,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final r = results.single!;
-    expect(r.participantId, 'P07');
+    expect(r.participantId, '');
     expect(r.answers['gsn_exp'], 'wrote');
     expect(r.answers['prog_exp'], 'gt3');
     expect(r.answers['sus1'], 4);

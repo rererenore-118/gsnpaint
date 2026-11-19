@@ -55,13 +55,13 @@ const freeTextQuestions = {
 };
 
 const maxFreeTextLength = 2000;
-const maxParticipantIdLength = 40;
 
 String susKey(int i) => 'sus${i + 1}';
 
 /// 送信する回答
 class SurveyResponse {
-  /// 実験で伝えた参加者番号（任意）
+  /// 参加者番号。回答者には聞かず、研究者が書き出すときに回答順で振る（[surveyResponsesToCsv]）。
+  /// 保存形式（firestore.rules）に合わせて、空の文字列のまま送る。
   final String participantId;
 
   /// gsn_exp・prog_exp（選択肢の値）、sus1〜sus10（1〜5）、good・bad（文字列）
@@ -127,12 +127,19 @@ String _formatTime(DateTime? t) {
   return '${l.year}-${_two(l.month)}-${_two(l.day)} ${_two(l.hour)}:${_two(l.minute)}';
 }
 
+/// 参加者番号: 回答日時の順に P001、P002… と振る
+String participantNumber(int index) => 'P${(index + 1).toString().padLeft(3, '0')}';
+
 /// 回答を CSV にする（Excel で文字化けしないよう、先頭に BOM を付ける）。
 /// 選択肢は画面の文ではなく値（none など）で書き、集計しやすくする。
+/// 参加者番号は回答日時の順に振るので、途中の回答を消すと後ろの番号がずれる。
 String surveyResponsesToCsv(List<StoredSurveyResponse> responses) {
+  final ordered = [...responses]..sort(
+    (a, b) => (a.submittedAt ?? DateTime(0)).compareTo(b.submittedAt ?? DateTime(0)),
+  );
   final header = [
-    '回答者',
     '参加者番号',
+    '回答者',
     '回答日時',
     ...backgroundQuestions.keys,
     for (var i = 0; i < susItems.length; i++) susKey(i),
@@ -140,10 +147,10 @@ String surveyResponsesToCsv(List<StoredSurveyResponse> responses) {
     ...freeTextQuestions.keys,
   ];
   final rows = [
-    for (final r in responses)
+    for (final (i, r) in ordered.indexed)
       [
+        participantNumber(i),
         r.respondent,
-        r.participantId,
         _formatTime(r.submittedAt),
         for (final k in backgroundQuestions.keys) r.answers[k],
         for (var i = 0; i < susItems.length; i++) r.answers[susKey(i)],

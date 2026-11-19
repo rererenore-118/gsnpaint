@@ -14,14 +14,12 @@ class SurveyDialog extends StatefulWidget {
 
 class _SurveyDialogState extends State<SurveyDialog> {
   final _answers = <String, Object>{};
-  final _participantCtl = TextEditingController();
   late final Map<String, TextEditingController> _textCtls = {
     for (final k in freeTextQuestions.keys) k: TextEditingController(),
   };
 
   @override
   void dispose() {
-    _participantCtl.dispose();
     for (final c in _textCtls.values) {
       c.dispose();
     }
@@ -53,7 +51,6 @@ class _SurveyDialogState extends State<SurveyDialog> {
     Navigator.pop(
       context,
       SurveyResponse(
-        participantId: _participantCtl.text.trim(),
         answers: {
           ..._answers,
           for (final e in _textCtls.entries) e.key: e.value.text.trim(),
@@ -141,15 +138,6 @@ class _SurveyDialogState extends State<SurveyDialog> {
               'エディタを使ってみた感想を教えてください。回答は研究のためにだけ使い、'
               'メールアドレスは保存しません。送信は 1 回だけです。',
               style: small,
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _participantCtl,
-              maxLength: maxParticipantIdLength,
-              decoration: const InputDecoration(
-                labelText: '参加者番号（任意）',
-                helperText: '実験で番号を伝えられた場合は書いてください',
-              ),
             ),
             _heading('あなたについて'),
             for (final e in backgroundQuestions.entries)
