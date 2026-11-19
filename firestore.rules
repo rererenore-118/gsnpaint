@@ -89,6 +89,56 @@ service cloud.firestore {
       allow create: if isOwner(uid) && isEncryptedItem(request.resource.data);
     }
 
+    // ---- 評価実験のアンケート（lib/survey.dart）----
+    // 研究者が集計できるよう暗号化しない。回答者はログイン済み・メールアドレス確認済みの本人で、
+    // 文書の名前を自分の uid にして 1 回だけ送れる（書き換え・削除はできない）。
+    // 全員の回答を読めるのは admins/{uid} に登録した研究者だけ（登録は Firebase コンソールで行う）。
+    function isAdmin() {
+      return request.auth != null
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isLikert(v) {
+      return v is int && v >= 1 && v <= 5;
+    }
+
+    function isFreeText(v) {
+      return v is string && v.size() <= 2000;
+    }
+
+    // 質問を変えたら lib/survey.dart と一緒に変え、surveyId の番号を上げる
+    function isSurveyAnswers(a) {
+      return hasExactly(a, ['gsn_exp', 'prog_exp',
+                            'sus1', 'sus2', 'sus3', 'sus4', 'sus5',
+                            'sus6', 'sus7', 'sus8', 'sus9', 'sus10',
+                            'good', 'bad'])
+          && a.gsn_exp in ['none', 'seen', 'wrote']
+          && a.prog_exp in ['lt1', '1to3', 'gt3']
+          && isLikert(a.sus1) && isLikert(a.sus2) && isLikert(a.sus3) && isLikert(a.sus4)
+          && isLikert(a.sus5) && isLikert(a.sus6) && isLikert(a.sus7) && isLikert(a.sus8)
+          && isLikert(a.sus9) && isLikert(a.sus10)
+          && isFreeText(a.good) && isFreeText(a.bad);
+    }
+
+    match /surveys/{surveyId}/responses/{uid} {
+      // 本人は「もう答えたか」を確かめるために自分の回答だけ読める
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(uid)
+                    && surveyId == 'editor-eval-v1'
+                    && hasExactly(request.resource.data, ['participantId', 'answers', 'submittedAt'])
+                    && request.resource.data.participantId is string
+                    && request.resource.data.participantId.size() <= 40
+                    && isSurveyAnswers(request.resource.data.answers)
+                    && request.resource.data.submittedAt == request.time;
+    }
+
+    // 研究者の登録。本人が自分の登録を確かめられるだけで、アプリからは書けない
+    match /admins/{uid} {
+      allow get: if request.auth != null && request.auth.uid == uid;
+    }
+
     // 図・CSV
     match /users/{uid}/{collection}/{docId} {
       allow read, delete: if isOwner(uid) && collection in ['diagrams', 'csvFiles'];

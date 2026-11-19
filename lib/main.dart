@@ -31,6 +31,9 @@ import 'node_edit_dialog.dart';
 import 'edge_edit_dialog.dart';
 import 'diagram_settings_dialog.dart';
 import 'editor_shortcuts.dart';
+import 'survey.dart';
+import 'survey_dialog.dart';
+import 'survey_service.dart';
 
 // PDF出力（評価前の編集中の図・評価結果の図の両方で使う）
 part 'pdf_export.dart';
@@ -733,6 +736,10 @@ class _GsnEditorState extends State<GsnEditor> {
   bool _inlineAwayGoals = false;
   // アカウント（Firestore）に置くCSV。FileListノードが参照する（暗号化して保存する）
   late final CloudCsvService _csvService = CloudCsvService(_crypto);
+  // 評価実験のアンケート（回答は暗号化せず、研究者だけが読める）
+  late final SurveyService _surveyService = SurveyService();
+  // 研究者として登録されたアカウントか（回答の書き出しを出す）
+  bool _isSurveyAdmin = false;
   // 直前に保存・読み込みした図の名前。次の保存ダイアログの初期値にする。
   String _cloudDiagramName = 'gsn';
   // 今編集しているアカウントの図（開いた・保存した図の名前）。「上書き保存」の保存先。
@@ -897,9 +904,11 @@ class _GsnEditorState extends State<GsnEditor> {
             _openCloudName = null;
             // ログアウト・別のアカウントへの切り替えでは、前のアカウントの鍵を忘れる
             _crypto.lock();
+            _isSurveyAdmin = false;
           }
           _user = user;
         });
+        _checkSurveyAdmin(user);
       }
     });
   }
@@ -1622,6 +1631,11 @@ class _GsnEditorState extends State<GsnEditor> {
           _gridSnapEnabled ? 'グリッド: オン' : 'グリッド: オフ',
           () => setState(() => _gridSnapEnabled = !_gridSnapEnabled),
         ),
+        const PopupMenuDivider(),
+        _menuHeader('アンケート'),
+        _menuItem(Icons.rate_review_outlined, 'アンケートに答える', _answerSurvey),
+        if (_isSurveyAdmin)
+          _menuItem(Icons.download, '回答を CSV で書き出す', _exportSurveyResponses),
         const PopupMenuDivider(),
         _menuItem(Icons.clear_all, '図をすべて削除', _confirmClearDiagram, color: Colors.red),
       ],
@@ -2994,6 +3008,77 @@ class _GsnEditorState extends State<GsnEditor> {
       }
     } else if (_cloudReady && mounted) {
       setState(() {}); // 確認済みになったらボタンを出す
+    }
+  }
+
+  // ---- 評価実験のアンケート ----
+
+  Future<void> _checkSurveyAdmin(User? user) async {
+    final admin = user != null &&
+        user.emailVerified &&
+        await _surveyService.isAdmin(user.uid);
+    if (mounted && user?.uid == _user?.uid && admin != _isSurveyAdmin) {
+      setState(() => _isSurveyAdmin = admin);
+    }
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  /// アンケートに答える。ログインとメールアドレスの確認が要り、1 人 1 回だけ送れる。
+  Future<void> _answerSurvey() async {
+    final blocked = _cloudBlockedReason;
+    if (blocked != null) {
+      _showMessage('アンケートに答えるには、$blocked');
+      if (_user == null) await _openAccount();
+      return;
+    }
+    final uid = _user!.uid;
+    try {
+      if (await _surveyService.hasAnswered(uid)) {
+        _showMessage('このアカウントはもうアンケートに答えています。ご協力ありがとうございました。');
+        return;
+      }
+    } catch (e) {
+      _showMessage('アンケートを開けませんでした: $e');
+      return;
+    }
+    if (!mounted) return;
+    final response = await showDialog<SurveyResponse>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const SurveyDialog(),
+    );
+    if (response == null) return;
+    try {
+      await _surveyService.submit(uid, response);
+      _showMessage('アンケートを送信しました。ご協力ありがとうございました。');
+    } catch (e) {
+      _showMessage('送信できませんでした: $e');
+    }
+  }
+
+  /// 研究者向け: 全員の回答を CSV で書き出す
+  Future<void> _exportSurveyResponses() async {
+    try {
+      final responses = await _surveyService.listAll();
+      if (responses.isEmpty) {
+        _showMessage('まだ回答がありません。');
+        return;
+      }
+      final blob = html.Blob([surveyResponsesToCsv(responses)], 'text/csv;charset=utf-8');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', '$surveyId.csv')
+        ..click();
+      html.Url.revokeObjectUrl(url);
+      _showMessage('${responses.length} 件の回答を書き出しました。');
+    } catch (e) {
+      _showMessage('回答を読み出せませんでした: $e');
     }
   }
 

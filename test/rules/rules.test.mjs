@@ -4,7 +4,7 @@
 import test, { before, after, beforeEach } from "node:test";
 import { readFileSync } from "node:fs";
 import { initializeTestEnvironment, assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from "firebase/firestore";
+import { doc, getDoc, getDocs, collection, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from "firebase/firestore";
 import c from "../../web/crypto/gsn_crypto.js";
 
 let env;
@@ -120,4 +120,54 @@ test("図の過去の版: 暗号化した形で本人だけが作れる。書き
   await assertSucceeds(deleteDoc(doc(db(ALICE), path)));
   // CSV の下には版を作れない
   await assertFails(setDoc(doc(db(ALICE), `users/${ALICE}/csvFiles/c1/versions/v1`), item));
+});
+
+// ---- 評価実験のアンケート ----
+const SURVEY = "surveys/editor-eval-v1/responses";
+const surveyAnswers = (over = {}) => ({
+  gsn_exp: "seen", prog_exp: "1to3",
+  sus1: 4, sus2: 2, sus3: 4, sus4: 1, sus5: 4, sus6: 2, sus7: 5, sus8: 2, sus9: 4, sus10: 3,
+  good: "", bad: "", ...over,
+});
+const surveyDoc = (over = {}, answers = {}) =>
+  ({ participantId: "P01", answers: surveyAnswers(answers), submittedAt: serverTimestamp(), ...over });
+
+test("アンケート: 本人は 1 回だけ答えられ、書き換え・削除はできない", async () => {
+  const ref = doc(db(ALICE), `${SURVEY}/${ALICE}`);
+  await assertFails(setDoc(doc(db(BOB), `${SURVEY}/${ALICE}`), surveyDoc()));
+  await assertFails(setDoc(doc(db(ALICE, false), `${SURVEY}/${ALICE}`), surveyDoc()));
+  await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(), `${SURVEY}/${ALICE}`), surveyDoc()));
+  await assertSucceeds(setDoc(ref, surveyDoc()));
+  await assertFails(setDoc(ref, surveyDoc()));
+  await assertFails(updateDoc(ref, { participantId: "P02" }));
+  await assertFails(deleteDoc(ref));
+  await assertSucceeds(getDoc(ref));
+  await assertFails(getDoc(doc(db(BOB), `${SURVEY}/${ALICE}`)));
+});
+
+test("アンケート: 形が違う回答・別の版は送れない", async () => {
+  const ref = doc(db(ALICE), `${SURVEY}/${ALICE}`);
+  await assertFails(setDoc(ref, surveyDoc({}, { sus3: 6 })));
+  await assertFails(setDoc(ref, surveyDoc({}, { sus3: "4" })));
+  await assertFails(setDoc(ref, surveyDoc({}, { gsn_exp: "expert" })));
+  await assertFails(setDoc(ref, surveyDoc({}, { extra: 1 })));
+  await assertFails(setDoc(ref, surveyDoc({}, { good: "x".repeat(2001) })));
+  await assertFails(setDoc(ref, surveyDoc({ email: "a@example.com" })));
+  await assertFails(setDoc(ref, surveyDoc({ participantId: "x".repeat(41) })));
+  await assertFails(setDoc(ref, surveyDoc({ submittedAt: Timestamp.fromMillis(0) })));
+  await assertFails(setDoc(doc(db(ALICE), `surveys/other/responses/${ALICE}`), surveyDoc()));
+});
+
+test("アンケート: 全員の回答を読めるのは admins に登録した研究者だけ", async () => {
+  await assertSucceeds(setDoc(doc(db(ALICE), `${SURVEY}/${ALICE}`), surveyDoc()));
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), "admins/carol"), {});
+  });
+  await assertFails(getDocs(collection(db(BOB), SURVEY)));
+  await assertFails(getDocs(collection(db(ALICE), SURVEY)));
+  await assertFails(getDocs(collection(db("carol", false), SURVEY)));
+  await assertSucceeds(getDocs(collection(db("carol"), SURVEY)));
+  await assertSucceeds(getDoc(doc(db("carol"), "admins/carol")));
+  await assertFails(getDoc(doc(db(BOB), "admins/carol")));
+  await assertFails(setDoc(doc(db(BOB), `admins/${BOB}`), {}));
 });
